@@ -4,8 +4,6 @@
 1. 每个角色只能拿到白名单里的工具，多一个都拿不到。
 2. 拿不到的调用会抛 PermissionError，不是静默失败。
 3. 工具就是唯一的跨角色通道；agent 之间不直接对话。
-
-这一层不靠"大家自觉"，靠代码挡住。
 """
 
 from __future__ import annotations

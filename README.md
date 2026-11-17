@@ -52,10 +52,52 @@
 
 ## 跑起来
 
-```bash
-python -m pytest tests/ -q          # 冒烟测试
-python -m novel_mas.db.migrate      # 建三个库到 data/
+### 最小闭环（能出结果，不花钱）
+
+```powershell
+cd E:\novel-mas
+$env:PYTHONPATH = 'E:\novel-mas\src'
+$env:PYTHONIOENCODING = 'utf-8'
+python -m novel_mas.orchestrator
 ```
+
+它会真的走完七步：注入世界观 → 定人设 → 设曲线 → 写一章 → 过闸 → 打分 → 落盘。
+
+输出长这样：
+
+```
+[1] 世界观入库：3 条
+[2] 人物入库：李三
+[3] 曲线入库：第1章 50 / 第2章 60 / 第3章 75
+
+[4] 写第 1 章（正常）
+第 1 章 · PASS
+  走向分 40 / 目标 50（偏差 -10）
+  落盘：E:\novel-mas\data\out\ch01.txt
+
+[5] 写第 2 章（故意踩硬约束）
+第 2 章 · VIOLATED
+  证据：违反硬约束「李三不能死」：正文出现了『死』
+  是否写出了成文文件：没有（被拦下）
+```
+
+模型是 `FakeProvider`（`src/novel_mas/llm.py`）——**不联网、结果固定**。所以：
+
+- ✅ 链路是真的（真读库、真写库、真拦）
+- ❌ 正文是占位文本，不是作品
+- ❌ 打分是词频估计，只能证明"分数能算出来"，证明不了"分数准"
+
+接真模型只需实现 `Provider` 协议（`complete()` + `tokens_used`），编排那七步一行不用改。
+
+### 其他
+
+```bash
+python -m pytest tests/ -q          # 冒烟测试（需先装 pytest）
+python -m novel_mas.db.migrate      # 只建三个库到 data/
+python examples/walkthrough.py      # 逐层讲解 types / 工具 / registry（零依赖）
+```
+
+注意：Windows PowerShell 下跑 Python，**一定要设 `PYTHONIOENCODING=utf-8`**，否则中文输出会乱码甚至崩。
 
 ## 架构图
 

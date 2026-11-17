@@ -59,10 +59,58 @@ python -m novel_mas.db.migrate      # 建三个库到 data/
 
 ## 架构图
 
-定稿版（v9）在 DSH 工作目录下：
+```mermaid
+flowchart TB
+    U["用户注入<br/>[世界观] prompt"]
 
-```
-<workspace>\.archify\architecture-mas-story-v9-20261117-1910\mas-story-v9.html
+    subgraph WW["世界隔离区｜只读世界圣经，不读正文全文"]
+        direction TB
+        WILL["世界意志<br/>整理 · 判官 · 记录"]
+        WDB[("world.db<br/>bible / events / links / pool")]
+        WTOOLS["工具 ×5<br/>判断 · 记大事 · 链接 · 随机 · 小事件"]
+        WILL --- WDB
+        WILL --- WTOOLS
+    end
+
+    subgraph CH["角色隔离区｜写手只能调工具"]
+        direction TB
+        CTOOLS["工具 ×3<br/>随机生成 · 导入 · 打分"]
+        CHAR["人物控制<br/>谁出场 · 什么状态"]
+        CDB[("char.db<br/>人物档 / 关系 / 状态")]
+        CHAR --- CDB
+        CTOOLS --- CHAR
+    end
+
+    subgraph TR["走向隔离区｜写手只能取曲线"]
+        direction TB
+        TTOOLS["工具 ×3<br/>结局意图 · 曲线 · 打分"]
+        TREND["世界走向<br/>这故事该不该走到这儿"]
+        TDB[("trend.db<br/>ending / curve / scores")]
+        TREND --- TDB
+        TTOOLS --- TREND
+    end
+
+    WRITER["写作 agent<br/>取齐五样 → 产出章节"]
+    WTOOLS2["写作工具集 ×5<br/>文风 · 曲线 · 人物 · 世界观 · 小事件链"]
+    OUT["成品章节<br/>过三闸才成文"]
+
+    U -->|注入世界观| WILL
+    WRITER -->|提交候选链接| WILL
+    WILL -.->|裁决 + 改法| WRITER
+    WRITER -->|取人设| CTOOLS
+    CTOOLS -.->|快照 / 打回| WRITER
+    WRITER -->|取曲线| TTOOLS
+    TTOOLS -.->|打分 / 打回| WRITER
+    WRITER --- WTOOLS2
+    WRITER -->|过闸成章| OUT
 ```
 
-编排日志与决策记录：`E:\dsh-data\novel-mas\编排日志.md`
+三条硬规矩看图就明白：
+
+1. 三个虚线框各自独立，**写手在框外**
+2. 写手到三个框的线，全是走工具集的
+3. 跨框没有一条 agent→agent 的直连
+
+> 可交互版本（带 trace 动效与导出）：`<workspace>\.archify\architecture-mas-story-v9-20261117-1910\mas-story-v9.html`
+>
+> 设计与决策记录：`E:\dsh-data\novel-mas\编排日志.md`

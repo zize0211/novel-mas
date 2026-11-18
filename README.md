@@ -193,6 +193,63 @@ python examples/walkthrough.py      # types → 工具 → registry
 
 > Windows 下运行 Python 应设置 `PYTHONIOENCODING=utf-8`，否则中文输出可能乱码或报错。
 
+## 使用方式：换成自己的故事
+
+`python -m novel_mas.orchestrator` 跑的是固定 demo。要写自己的书，直接用 `Orchestrator`：
+三个配置方法 + 一个写章方法。
+
+```python
+from novel_mas.llm import FakeProvider
+from novel_mas.orchestrator import Orchestrator
+
+orc = Orchestrator(book_id="lamp", llm=FakeProvider(style="日常"))
+
+orc.ingest_worldview("雨停之后，城里的灯要自己点。点灯人一生只能点一盏。")
+orc.add_character("林小满", "十五岁，点灯人的学徒，怕黑，说话总是先看一眼灯", "lead")
+orc.set_trend(
+    points=[(1, 50, 15), (2, 65, 15)],       # (章, 目标分, 容忍带)
+    ending_type="bittersweet",
+    target_score=75,
+    hard_constraints=["林小满不能失忆"],
+)
+
+r = orc.write_chapter(1, "林小满第一次独自去点灯，火折子在雨里湿了一半。")
+print(r.brief())
+```
+
+上面的写法实际跑过，输出为：
+
+```
+第 1 章 · 过闸 PASS / 走向 on_track
+  走向分 50 / 目标 50（偏差 +0）
+  用掉 token 1200
+  分账：character 589 / trend 310 / world_will 199 / writer 102
+  证据：
+    - 过闸 pass：[假模型] 没匹配到违禁词，放行
+    - 人物 林小满：60 分（阈值 60，过）
+  落盘：data/out/lamp-ch01.txt
+```
+
+接口一览：
+
+| 方法 | 参数 | 作用 |
+|---|---|---|
+| `ingest_worldview(prompt)` | 一段世界观文字 | 按「。」「；」拆条目写进 `world_bible`；同一本书重灌是覆盖 |
+| `add_character(name, profile, importance)` | `importance` 取 `lead` / `support` | 写进 `characters`，初始状态「初登场」 |
+| `set_trend(points, ending_type, target_score, hard_constraints)` | `points` 为 `(章, 目标分, 容忍带)` | 写 `ending_intent` 与 `curve` |
+| `write_chapter(chapter, brief, mock_text=None, max_retries=1)` | `brief` 是本章要发生什么 | 走完七步，返回 `WriteResult` |
+
+`WriteResult` 可读字段：`verdict`（过闸 `pass` / `violated`）、`trend_verdict`（`on_track` / `drifted` / `violated`）、
+`score`、`target`、`deviation`、`tokens`、`cost_by_role`（按角色分账）、`evidence`、`out_path`。
+
+需要注意的三点：
+
+- `book_id` 决定数据归属；同一 `book_id` 重跑会覆盖同名条目，不追加。
+- 正文落盘在 `data/out/<book_id>-chNN.txt`；`book_id="demo"` 仍用 `chNN.txt`（实验记录引用过这些文件名）。
+- 正常一章调用 4 次模型（写手 1 次 + 三裁判各 1 次）；被拦且还有重写预算时，多一次 acceptor 仲裁。
+
+接真模型只需换 `llm`：`Orchestrator(book_id="lamp", llm=OpenAIProvider.from_env())`，其余代码不动。
+
 ## 实验摘要
 
 ### E-007：同一份正文（1266 字，未改动）的判官温度影响

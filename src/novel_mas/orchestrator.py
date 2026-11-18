@@ -442,7 +442,9 @@ class Orchestrator:
         out_path = None
         if not blocked:
             OUT_DIR.mkdir(parents=True, exist_ok=True)
-            p = OUT_DIR / f"ch{chapter:02d}.txt"
+            # demo 沿用老文件名（实验记录引用过 ch01.txt），其它书加前缀，免得互相覆盖
+            name = f"ch{chapter:02d}.txt" if book == "demo" else f"{book}-ch{chapter:02d}.txt"
+            p = OUT_DIR / name
             p.write_text(text, encoding="utf-8")
             out_path = str(p)
 

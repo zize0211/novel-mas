@@ -179,7 +179,16 @@ NOVEL_MODEL=deepseek-chat
 实现 `Provider` 协议即可（仅需 `complete(prompt, system)` 与 `tokens_used()` 两个成员），
 编排层不需要修改。判官走 `judge_mode()`（0.1），写作仍为 0.8；原因见 E-007。
 
-### 3. 简易界面（可选，标准库 `http.server`）
+### 3. 简易界面（可选）
+
+Windows 直接双击 **`start-app.bat`**。它不弹黑框，实际逻辑在 `start-app.ps1`：
+
+- 起 `python -m novel_mas.web`（端口已在听就不重复起，也不接管别人起的进程）
+- 用**独立 profile** 开一个 Edge / Chrome 应用窗口（`--app`），关掉窗口就是真退出
+- 窗口关掉后，只停它自己起的那个服务
+- 全过程写进 `app.log`
+
+手动起（macOS / Linux，或不想开独立窗口）：
 
 ```powershell
 python -m novel_mas.web      # http://127.0.0.1:8787
@@ -298,6 +307,7 @@ print(r.brief())
 | `src/novel_mas/orchestrator.py` | 七步编排、判定链、重写闭环 |
 | `src/novel_mas/llm.py` | `Provider` 协议、`FakeProvider`、`judge_mode()`、token 记账 |
 | `src/novel_mas/web.py` | 表单式简易界面（端口 8787） |
+| `start-app.bat` / `start-app.ps1` | Windows 桌面启动器：起服务 + 开应用窗口，关窗即退 |
 | `schemas/all.sql` | 三个库的建表 SQL |
 | `docs/architecture.md` | 设计取舍与已知问题 |
 | `tests/selfcheck.py` | 零依赖自检（CI 使用） |

@@ -149,6 +149,14 @@ class Writer(BaseAgent):
                 "WHERE book_id = ? AND kind = 'major'",
                 (book_id,),
             ).fetchall()
+            # 前面几章发生过什么（小事）。写手要接得上，
+            # 不然每一章都像第一章 —— 人还在原地，事还没发生。
+            recap_rows = conn.execute(
+                "SELECT chapter, title, summary FROM events "
+                "WHERE book_id = ? AND kind = 'minor' AND chapter IS NOT NULL "
+                "ORDER BY chapter DESC, id DESC LIMIT 8",
+                (book_id,),
+            ).fetchall()
         finally:
             conn.close()
 
@@ -182,7 +190,13 @@ class Writer(BaseAgent):
         if row and row["hard_constraints"]:
             constraints.extend(json.loads(row["hard_constraints"]))
 
-        return {"entries": entries, "constraints": constraints}
+        # 前面几章发生过什么（按章倒序取，给 orchestrator 塞进 prompt）
+        recap = [
+            {"chapter": r["chapter"], "title": r["title"], "summary": r["summary"]}
+            for r in recap_rows
+        ]
+
+        return {"entries": entries, "constraints": constraints, "recap": recap}
 
     # ---------- 工具 5：小事链接（只提交候选） ----------
 

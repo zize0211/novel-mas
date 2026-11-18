@@ -36,7 +36,7 @@ from .agents import bootstrap
 from .db import base as db
 from .llm import FakeProvider, Provider
 from .tools.registry import ToolRegistry
-from .types import TrendVerdict, Verdict
+from .types import Event, EventKind, TrendVerdict, Verdict
 
 OUT_DIR = Path(__file__).resolve().parents[2] / "data" / "out"
 
@@ -171,6 +171,7 @@ class Orchestrator:
         chapter: int,
         brief: str,
         mock_text: str | None = None,
+        max_retries: int = 1,
     ) -> WriteResult:
         reg, book = self.registry, self.book_id
 
@@ -183,9 +184,10 @@ class Orchestrator:
         # 3. 取人物快照
         chars = reg.call("writer", "get_characters", book_id=book)
 
-        # 4. 取世界观 + 硬约束
+        # 4. 取世界观 + 硬约束 + 前情
         wv = reg.call("writer", "get_worldview", book_id=book)
         entries, constraints = wv["entries"], wv["constraints"]
+        recap = wv.get("recap") or []
 
         # 5. 写正文（这一步是写手的笔，不是工具）
         char_block = "\n".join(
@@ -194,43 +196,138 @@ class Orchestrator:
         ) or "- （无人物档）"
         world_block = "\n".join(f"- {e['body']}" for e in entries) or "- （无世界观）"
 
-        prompt = (
+        # 前情：库里是倒序取的（最近在前），这里翻回时间正序给模型看
+        recap_block = "\n".join(
+            f"- 第 {r['chapter']} 章：{r['summary']}" for r in reversed(recap)
+        ) or "- （这是第一章，前面没有故事）"
+
+        base_prompt = (
             f"【文风】{style}\n"
             f"【本章目标】第 {chapter} 章，走向分目标 {curve.target}"
             f"（容差 ±{curve.tolerance}）\n"
+            f"【前情】\n{recap_block}\n"
             f"【大纲】{brief}\n"
             f"【人物】\n{char_block}\n"
             f"【世界观】\n{world_block}\n"
             f"【硬约束】{constraints or '无'}\n"
             f"请写这一章的正文。"
         )
-        text = mock_text if mock_text is not None else self.llm.complete(prompt)
 
-        # 6. 世界意志过闸（真推理，不是关键词）
-        judgment = reg.call(
-            "world_will", "check_consistency", claim=text, chapter=chapter
-        )
+        # 打回后重写。mock_text 是测试用的固定稿，重写没意义，所以只跑一稿。
+        retry_budget = 0 if mock_text is not None else max(0, max_retries)
+        feedback = ""
+        attempts = 0
 
-        # 7. 走向打分（模型抽事件 + Python 按口径算分）
-        scored = reg.call(
-            "trend", "score_direction", book_id=book, text=text, chapter=chapter
-        )
+        for attempt in range(retry_budget + 1):
+            attempts = attempt + 1
+            text = (
+                mock_text
+                if mock_text is not None
+                else self.llm.complete(base_prompt + feedback)
+            )
 
-        # 拦不拦：三个裁判（世界 / 走向）**任一说撞了就拦**。
-        # 光看世界裁判会漏 —— 走向裁判自己也有一套撞约束检查（_check_violated），
-        # 它判 violated 而世界裁判说 pass 时，以前会：返回 pass、成文落盘、库里存 violated。
-        # 两个裁判独立判、各自可能漏，所以取并集，不取交集。
-        blocked = (
-            judgment.verdict is Verdict.HARD_CONFLICT
-            or scored.verdict is TrendVerdict.VIOLATED
-        )
+            # 6. 世界意志过闸（真推理，不是关键词）
+            judgment = reg.call(
+                "world_will", "check_consistency", claim=text, chapter=chapter
+            )
 
-        evidence = [f"过闸 {judgment.verdict.value}：{judgment.reason}"]
+            # 7. 走向打分（模型抽事件 + Python 按口径算分）
+            scored = reg.call(
+                "trend", "score_direction", book_id=book, text=text, chapter=chapter
+            )
+
+            # 8. 人物裁判：只评 lead（主角级）。support/minor 不评，省调用。
+            #
+            #    口径：人物分低**不硬拦**。它是软判断——「这章人物有点飘」跟
+            #    「主角死了」不是一回事，不能同样一票否决。
+            #    但它照样进证据链：不过阈值时把失分项带出来，那是改稿线索。
+            char_reviews: list[dict] = []
+            for c in chars:
+                if c.importance != "lead":
+                    continue
+                char_reviews.append(
+                    reg.call(
+                        "character",
+                        "score_in_character",
+                        book_id=book,
+                        name=c.name,
+                        text=text,
+                        chapter=chapter,
+                    )
+                )
+
+            # 拦不拦：硬裁判（世界 / 走向）**任一说撞了就拦**。
+            # 光看世界裁判会漏 —— 走向裁判自己也有一套撞约束检查（_check_violated），
+            # 它判 violated 而世界裁判说 pass 时，以前会：返回 pass、成文落盘、库里存 violated。
+            # 两个裁判独立判、各自可能漏，所以取并集，不取交集。
+            # 人物裁判只记不拦，见上面第 8 步的口径。
+            blocked = (
+                judgment.verdict is Verdict.HARD_CONFLICT
+                or scored.verdict is TrendVerdict.VIOLATED
+            )
+
+            char_ok = all(r["passed"] for r in char_reviews)
+            last_chance = attempt >= retry_budget
+
+            # 拦不拦：
+            #   硬裁判（世界 / 走向）任一说撞了 → 直接拦
+            #   人物跑偏 → 先给重写机会；重写次数用完还不过，也拦
+            #
+            # 为什么不光看分数高低：分数是模型的软判断，一次误判就毙掉整章太狠。
+            # 看「给没给改正机会」更稳 —— 重写过了还跑偏，那就是真跑偏了。
+            blocked = (
+                judgment.verdict is Verdict.HARD_CONFLICT
+                or scored.verdict is TrendVerdict.VIOLATED
+                or (not char_ok and last_chance)
+            )
+
+            should_retry = blocked or not char_ok
+            if not should_retry or last_chance:
+                break
+
+            # 重写：把「上一稿哪里不行」喂给下一稿，让它自己避开
+            reasons = [judgment.reason] + list(scored.violated_constraints)
+            if not char_ok:
+                for r in char_reviews:
+                    if r["passed"]:
+                        continue
+                    reasons.append(f"{r['name']} 人设偏离：{r['reason']}")
+                    reasons.extend(r["violations"])
+
+            feedback = (
+                "\n\n【上一稿没通过，这一稿必须避开】\n"
+                + "\n".join(f"- {r}" for r in reasons if r)
+                + "\n重写这一章，别再犯上面这些。"
+            )
+
+        evidence: list[str] = []
+        # 两个硬裁判都说没事、结果却被拦了 —— 那只能是人物拦的。
+        # 不写这一行，证据链看起来会自相矛盾（「过闸 pass」却说 violated）。
+        if blocked and (
+            judgment.verdict is not Verdict.HARD_CONFLICT
+            and scored.verdict is not TrendVerdict.VIOLATED
+        ):
+            evidence.append("拦下原因：人物跑偏，重写次数用尽仍不过阈值")
+        if attempts > 1:
+            evidence.append(f"打回后重写了 {attempts - 1} 次")
+        evidence.append(f"过闸 {judgment.verdict.value}：{judgment.reason}")
         evidence += [
             f"事件 {e['kind']}（{e['weight']:+d}）：{e['what']}" for e in scored.evidence
         ]
         if scored.violated_constraints:
             evidence += [f"撞约束：{v}" for v in scored.violated_constraints]
+
+        # 人物裁判的结论也进证据链，但不参与拦不拦
+        for r in char_reviews:
+            mark = "过" if r["passed"] else "不过"
+            evidence.append(
+                f"人物 {r['name']}：{r['score']} 分"
+                f"（阈值 {r['threshold']}，{mark}）"
+            )
+            for v in r["violations"]:
+                evidence.append(f"  人设偏离：{v}")
+            if not r["passed"] and r.get("fix_hint"):
+                evidence.append(f"  建议：{r['fix_hint']}")
 
         # 落库：一章一条，重跑就覆盖。
         # 判定以**过闸**为准：被拦下的章，走向分再正常也是 violated。
@@ -278,6 +375,23 @@ class Orchestrator:
             p = OUT_DIR / f"ch{chapter:02d}.txt"
             p.write_text(text, encoding="utf-8")
             out_path = str(p)
+
+            # 章过了，把「这一章发生了什么」记成小事 —— 下一章取世界观时能看到。
+            # 只记过的章：被拦下的那几稿是废稿，不该进历史。
+            summary = brief
+            if scored.evidence:
+                summary += "｜" + "；".join(e["what"] for e in scored.evidence)
+            reg.call(
+                "world_will",
+                "record_minor_event",
+                ev=Event(
+                    book_id=book,
+                    kind=EventKind.MINOR,
+                    title=f"第{chapter}章",
+                    summary=summary,
+                    chapter=chapter,
+                ),
+            )
 
         return WriteResult(
             chapter=chapter,

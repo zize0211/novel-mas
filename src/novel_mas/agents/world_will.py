@@ -185,13 +185,26 @@ class WorldWill(BaseAgent):
 
     # ---------- 工具 3：小事件记录 ----------
 
-    def record_minor_event(self, ev: Event) -> int:
-        """记小事件。只留痕，不加约束。"""
+    def record_minor_event(self, ev: Event, dedupe: bool = True) -> int:
+        """记小事件。只留痕，不加约束。
+
+        dedupe=True 时，同一个 title + chapter 已经记过就先删旧的再写新的。
+        重写同一章不该在历史里堆两条 —— 实测跑三次就堆了三份同样的摘要。
+        """
         if ev.kind is not EventKind.MINOR:
             raise ValueError("这是 record_minor_event，kind 必须是 minor")
 
         conn = db.connect("world.db")
         try:
+            if dedupe and ev.chapter is not None:
+                # chapter IS ? 而不是 = ?：要能匹配 NULL
+                conn.execute(
+                    "DELETE FROM events"
+                    " WHERE book_id = ? AND kind = 'minor'"
+                    "   AND title = ? AND chapter IS ?",
+                    (ev.book_id, ev.title, ev.chapter),
+                )
+
             cur = conn.execute(
                 "INSERT INTO events"
                 "(book_id, kind, title, summary, chapter, constraints,"

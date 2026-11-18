@@ -217,6 +217,8 @@ class Orchestrator:
         retry_budget = 0 if mock_text is not None else max(0, max_retries)
         feedback = ""
         attempts = 0
+        blocked = False                  # 循环里会重算，先给个底
+        arbitrations: list[dict] = []    # 仲裁记录（可能有多次重写）
 
         for attempt in range(retry_budget + 1):
             attempts = attempt + 1
@@ -269,35 +271,77 @@ class Orchestrator:
             char_ok = all(r["passed"] for r in char_reviews)
             last_chance = attempt >= retry_budget
 
-            # 拦不拦：
-            #   硬裁判（世界 / 走向）任一说撞了 → 直接拦
-            #   人物跑偏 → 先给重写机会；重写次数用完还不过，也拦
-            #
-            # 为什么不光看分数高低：分数是模型的软判断，一次误判就毙掉整章太狠。
-            # 看「给没给改正机会」更稳 —— 重写过了还跑偏，那就是真跑偏了。
-            blocked = (
+            # 硬裁判（世界 / 走向）：它们管"该不该一票否决"
+            hard_blocked = (
                 judgment.verdict is Verdict.HARD_CONFLICT
                 or scored.verdict is TrendVerdict.VIOLATED
-                or (not char_ok and last_chance)
             )
+            # 全过 = 硬裁判都没事，而且人物也过
+            passed_all = (not hard_blocked) and char_ok
 
-            should_retry = blocked or not char_ok
-            if not should_retry or last_chance:
+            if passed_all:
+                blocked = False
                 break
 
-            # 重写：把「上一稿哪里不行」喂给下一稿，让它自己避开
-            reasons = [judgment.reason] + list(scored.violated_constraints)
-            if not char_ok:
-                for r in char_reviews:
-                    if r["passed"]:
-                        continue
-                    reasons.append(f"{r['name']} 人设偏离：{r['reason']}")
-                    reasons.extend(r["violations"])
+            if last_chance:
+                # 改的机会用完了还不过 → 拦。
+                # 硬裁判说撞了当然拦；人物跑偏改不过也拦 ——
+                # 不因为一次软判断的误判就毙掉整章，但给过机会还不改就是真跑偏。
+                blocked = True
+                break
+
+            # ---- 还有改写机会：请仲裁者给指令，别自己拼 ----
+            #
+            # 为什么不自己拼：三个裁判各说各的，写手拿到会懵
+            # （世界说 pass，人物说不行，听谁的？）。
+            # 收敛成一条可执行的改写指令，是仲裁者的活。
+            arbitration = reg.call(
+                "acceptor",
+                "arbitrate",
+                chapter=chapter,
+                text=text,
+                brief=brief,
+                judgments=[
+                    {
+                        "judge": "world_will",
+                        "verdict": judgment.verdict.value,
+                        "reason": judgment.reason,
+                    },
+                    {
+                        "judge": "trend",
+                        "verdict": scored.verdict.value,
+                        "reason": (
+                            f"{scored.score} 分 / 目标 {scored.target}"
+                            f"（偏差 {scored.deviation:+d}）"
+                        ),
+                        "violations": scored.violated_constraints,
+                    },
+                ]
+                + [
+                    {
+                        "judge": f"character:{r['name']}",
+                        "verdict": "过" if r["passed"] else "不过",
+                        "reason": r["reason"],
+                        "violations": r["violations"],
+                    }
+                    for r in char_reviews
+                ],
+            )
+            arbitrations.append(arbitration)
+
+            if arbitration["decision"] == "pass":
+                # 它看完全部材料说不用改 —— 放行
+                blocked = False
+                break
+
+            blocked = arbitration["decision"] == "block"
+            if blocked:
+                break
 
             feedback = (
-                "\n\n【上一稿没通过，这一稿必须避开】\n"
-                + "\n".join(f"- {r}" for r in reasons if r)
-                + "\n重写这一章，别再犯上面这些。"
+                "\n\n【主编的改写指令】\n"
+                f"{arbitration['rewrite_advice']}\n"
+                "按这个改，其它地方不要动。"
             )
 
         evidence: list[str] = []
@@ -310,6 +354,11 @@ class Orchestrator:
             evidence.append("拦下原因：人物跑偏，重写次数用尽仍不过阈值")
         if attempts > 1:
             evidence.append(f"打回后重写了 {attempts - 1} 次")
+        for i, arb in enumerate(arbitrations, 1):
+            evidence.append(
+                f"仲裁 #{i}：{arb['decision']}"
+                f"（听 {arb['agrees_with']}）{arb['why'][:60]}"
+            )
         evidence.append(f"过闸 {judgment.verdict.value}：{judgment.reason}")
         evidence += [
             f"事件 {e['kind']}（{e['weight']:+d}）：{e['what']}" for e in scored.evidence

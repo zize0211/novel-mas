@@ -72,6 +72,7 @@ def _counts() -> None:
     assert len(reg.names_for("character")) == 3
     assert len(reg.names_for("trend")) == 3
     assert len(reg.names_for("writer")) == 5
+    assert len(reg.names_for("acceptor")) == 2
 
 
 check("四个角色工具数对得上", _counts)

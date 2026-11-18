@@ -1,4 +1,4 @@
-"""四个 agent 的公共底座 + 注册入口。
+"""五个 agent 的公共底座 + 注册入口。
 
 注意：agent 之间**没有**互相调用的口子。想跨角色做事，只能通过
 `tools.registry` 里的工具，而工具是设了白名单的。
@@ -24,7 +24,7 @@ class BaseAgent:
 
 
 def bootstrap(registry=None, llm=None, book_id: str = "demo"):
-    """把四个 agent 的工具都注册到 registry，返回 registry。
+    """把五个 agent 的工具都注册到 registry，返回 registry。
 
     编排层（orchestrator）启动时调一次。
     llm 给要判语义的三个 agent 用；不传就是没接模型，调那些工具时才报错。
@@ -36,12 +36,13 @@ def bootstrap(registry=None, llm=None, book_id: str = "demo"):
     if reg._tools:  # 已经注册过就不重复
         return reg
 
-    from . import character, trend, world_will, writer
+    from . import character, acceptor, trend, world_will, writer
 
     world_will.bind(reg, llm, book_id)
     character.bind(reg, llm, book_id)
     trend.bind(reg, llm, book_id)
     writer.bind(reg)
+    acceptor.bind(reg, llm, book_id)
 
     missing = reg.check_coverage()
     if missing:

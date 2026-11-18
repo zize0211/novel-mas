@@ -45,7 +45,7 @@
 |---|---|
 | `docs/` | 各个 agent 的接口定义 |
 | `schemas/` | 三个库的建表 SQL |
-| `src/novel_mas/agents/` | 四个 agent |
+| `src/novel_mas/agents/` | 五个 agent |
 | `src/novel_mas/tools/` | 工具注册表 + 权限控制 + 校验守卫 |
 | `src/novel_mas/db/` | SQLite 连接与建库 |
 | `tests/` | 冒烟测试 |

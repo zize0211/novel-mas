@@ -34,6 +34,13 @@ ROLE_TOOLS: dict[str, set[str]] = {
         "set_curve",
         "score_direction",
     },
+    # 测试：2 个。跨三个库**只读**。
+    # review_article = 整体评审（三裁判各看一摊，它合起来读一遍）
+    # arbitrate      = 全局仲裁（三裁判打架、或一致不过时，由它裁 + 给改写指令）
+    "acceptor": {
+        "review_article",
+        "arbitrate",
+    },
     # 写作：5 个（全是取，没有一个是写）
     "writer": {
         "set_style",

@@ -77,6 +77,12 @@ class FakeProvider:
                     "hard_constraints": [],
                     "soft_preferences": [],
                     "points": [],
+                    # acceptor.arbitrate 要的字段
+                    "decision": "rewrite",
+                    "agrees_with": "none",
+                    "why": "[假模型] 不做仲裁，一律让它改",
+                    "rewrite_advice": "[假模型] 这是占位改写指令，真模型才会给具体的内容",
+                    "overall": "shaky",
                 },
                 ensure_ascii=False,
             )
@@ -116,19 +122,33 @@ class EchoProvider:
 
 
 def parse_json_block(text: str) -> dict:
-    """从模型回复里抠 JSON。容错：带 ```json 围栏、前后夹废话。
+    """从模型回复里抠 JSON。容错：带 ```json 围栏、前后夹废话、连着吐两个对象。
 
     放在 llm 模块里，因为「模型输出不干净」是通用问题，不只世界意志会遇到。
+
+    ⚠ 别用「找第一个 { 到最后一个 }」那种办法 —— 模型偶尔会把两个对象
+    连着吐出来（比如先给一个 problems 数组再给一个对象），那样切出来的
+    是两段 JSON 拼在一起，json.loads 直接报 Extra data。
+    raw_decode 只吃第一个完整 JSON，后面的不管。
     """
     s = text.strip()
     if s.startswith("```"):
         s = s.split("\n", 1)[1] if "\n" in s else s
         if s.endswith("```"):
             s = s[:-3]
-    i, j = s.find("{"), s.rfind("}")
-    if i < 0 or j <= i:
+
+    i = s.find("{")
+    if i < 0:
         raise ValueError(f"模型没给 JSON：{text[:200]}")
-    return json.loads(s[i:j + 1])
+
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(s[i:])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"模型给的 JSON 坏了（{exc}）：{text[:300]}") from exc
+
+    if not isinstance(obj, dict):
+        raise ValueError(f"模型给的不是对象：{text[:200]}")
+    return obj
 
 
 def _load_dotenv(path: str = ".env") -> None:

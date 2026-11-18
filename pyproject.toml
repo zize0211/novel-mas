@@ -1,7 +1,7 @@
 [project]
 name = "novel-mas"
 version = "0.1.0"
-description = "多智能体写小说：三个裁判 + 一个写手"
+description = "A minimal multi-agent writing experiment: three judges, one writer, code-enforced isolation."
 requires-python = ">=3.11"
 dependencies = []
 

@@ -1,7 +1,9 @@
-# novel-mas · 三个裁判盯着一个写手写小说
+# novel-mas
 
-> 一个用于学习与实验的多智能体最小闭环：把「角色隔离」写成可被测试的代码，
-> 再用一组对照实验检验它的收益与代价。
+> A minimal multi-agent writing experiment: three judges, one writer,
+> and a database boundary enforced in code.
+>
+> 三个裁判各守一个库，写手只交正文；隔离由代码强制。
 >
 > 纯标准库 · 零第三方依赖 · Python ≥ 3.11 · MIT
 > 建立 2026-11-17，最后更新 2026-11-18

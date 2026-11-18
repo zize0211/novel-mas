@@ -1,28 +1,28 @@
 # novel-mas · 三个裁判盯着一个写手写小说
 
-> 一个**学习用**的多智能体最小闭环：把「角色隔离」写成**代码能测**的东西，
-> 再用一组对照实验看它到底值不值那个 token 钱。
+> 一个用于学习与实验的多智能体最小闭环：把「角色隔离」写成可被测试的代码，
+> 再用一组对照实验检验它的收益与代价。
 >
 > 纯标准库 · 零第三方依赖 · Python ≥ 3.11 · MIT
 > 建立 2026-11-17，最后更新 2026-11-18
 
 ---
 
-## 一句话
+## 概述
 
-**写手只能写正文**；世界观、人物、走向三个裁判各自独占一个 SQLite 库，只有它自己能写；
-写手只能读快照、只能提交候选。三裁判全过才落盘，不过就由第四个角色（跨三库只读的验收 agent）
-仲裁，给可执行的改写指令，再重写。
+写手只能写正文。世界观、人物、走向三个裁判各自独占一个 SQLite 库，只有它自己能写；
+写手只能读快照、只能提交候选。三裁判全过才落盘；不通过时，由第四个角色
+（跨三库只读的验收 agent）仲裁，给出可执行的改写指令后重写。
 
-不是产品，也不是框架 —— 是**一个能跑、能测、能复现的对照实验**。
+本项目是实验代码，不是产品，也不是通用框架。目标是可运行、可测试、可复现。
 
-## 这个项目想验证什么
+## 研究问题
 
-1. **隔离能不能落在代码里**，而不是靠提示词自觉
-2. **多裁判一条链，能不能真的压住硬伤**
-3. **为此要多花多少 token**
+1. 角色隔离能否由代码强制，而不是依赖提示词约束
+2. 多裁判链路能否实际降低硬伤数量
+3. 为此需要付出多少 token 成本
 
-三个问题各有一节实验记录，数据都在 [`EXPERIMENTS.md`](EXPERIMENTS.md)。
+三个问题各对应一节实验记录，数据见 [`EXPERIMENTS.md`](EXPERIMENTS.md)。
 
 ## 判定链
 
@@ -31,18 +31,17 @@
    │
    ├─ 三裁判并行：世界意志 / 人物控制 / 世界走向
    │
-   ├─ 全过 ────────────────────────────────▶ 落盘
+   ├─ 全部通过 ────────────────────────────▶ 落盘
    │
-   └─ 有不过
+   └─ 存在不通过
         ├─ 改写次数用尽 ───────────────────▶ 拦下，不落盘
-        └─ 还有次数 → acceptor 仲裁 ────────▶ 按指令重写
-                       （听谁的 + 怎么改，给成可执行的句子）
+        └─ 仍有次数 → acceptor 仲裁 ────────▶ 按指令重写
+                       （听取哪一方 + 如何改写，输出可执行指令）
 ```
 
-两个省钱的口子：**全过不调仲裁**、**改写次数用尽不调仲裁**。
-仲裁不是「觉得不好就调」，而是在「打架或一致不过」时才出场。
+为控制成本，仲裁只在两种情况下调用：三裁判全过时不调用；改写次数用尽后不再调用。
 
-## 三个角色区 + 一个写手 + 一个验收
+## 角色与库
 
 ```mermaid
 flowchart TB
@@ -76,51 +75,51 @@ flowchart TB
     WRITER -->|提交候选链接| WW
     WRITER -->|三裁判结论| ACC
     ACC -.->|仲裁 + 改写指令| WRITER
-    WW -->|过/不过| ACC
-    CH -->|过/不过| ACC
-    TR -->|过/不过| ACC
+    WW -->|通过/不通过| ACC
+    CH -->|通过/不通过| ACC
+    TR -->|通过/不通过| ACC
     WRITER -->|三闸全过才成文| OUT
 ```
 
 ## 三条硬规矩
 
-1. **三个裁判各自独占自己的库**，只有它自己能写；写手只读。
-2. **所有跨角色交互都走工具**，agent 之间没有自由对话。
-3. **写手能改的只有正文**。想动设定、人设、走向，都得走单向工具去求。
+1. 三个裁判各自独占自己的库，只有它自己能写；写手只读。
+2. 所有跨角色交互都走工具，agent 之间没有自由对话。
+3. 写手能改的只有正文。想动设定、人设、走向，都要走单向工具申请。
 
-隔离靠代码落地，不靠自觉 —— 见 [`src/novel_mas/tools/registry.py`](src/novel_mas/tools/registry.py)
-的工具白名单，以及 `tests/selfcheck.py` 里那四条「拿不到」断言。
+隔离由代码强制，而非依赖提示词约束：见 [`src/novel_mas/tools/registry.py`](src/novel_mas/tools/registry.py)
+的工具白名单，以及 `tests/selfcheck.py` 中的四条越权断言。
 
 ## 工具清单（19 个）
 
-| 角色 | 数 | 工具 | 能写库 |
+| 角色 | 数 | 工具 | 可写库 |
 |---|---|---|---|
-| 世界意志 | 6 | `check_consistency` `record_event` `record_minor_event` `link_events` `manage_random` `inject_event` | ✅ 只写 `world.db` |
-| 人物控制 | 3 | `random_character` `import_character` `score_in_character` | ✅ 只写 `char.db` |
-| 世界走向 | 3 | `set_ending_intent` `set_curve` `score_direction` | ✅ 只写 `trend.db` |
-| 验收 acceptor | 2 | `review_article` `arbitrate` | ❌ 跨三库只读 |
-| 写作 writer | 5 | `set_style` `get_curve` `get_characters` `get_worldview` `link_minor_events` | ❌ 一个写库工具都没有 |
+| 世界意志 | 6 | `check_consistency` `record_event` `record_minor_event` `link_events` `manage_random` `inject_event` | 仅 `world.db` |
+| 人物控制 | 3 | `random_character` `import_character` `score_in_character` | 仅 `char.db` |
+| 世界走向 | 3 | `set_ending_intent` `set_curve` `score_direction` | 仅 `trend.db` |
+| 验收 acceptor | 2 | `review_article` `arbitrate` | 不可写（跨三库只读） |
+| 写作 writer | 5 | `set_style` `get_curve` `get_characters` `get_worldview` `link_minor_events` | 不可写（无任何写库工具） |
 
-> `link_minor_events` 只产出 `pending_review` 候选，落不落盘由世界意志点头。
+> `link_minor_events` 只产生 `pending_review` 候选，是否落盘由世界意志决定。
 
-## 现在到哪一步了（诚实版）
+## 实现现状
 
 | 能力 | 状态 | 证据 |
 |---|---|---|
-| 五角色 / 19 工具 / 白名单隔离 | ✅ 实现，有测试 | `tests/selfcheck.py` 14 项 |
-| 假模型七步闭环（注入→取数→生成→过闸→打分→落盘） | ✅ | E-001 |
-| 真模型出可读正文 | ✅ | E-002 |
-| 打回后自动重写 | ✅ | E-003 |
-| 三裁判角度互补 | ✅ | E-004 |
-| 判官判得准不准 | ❌ **81.8%，没过线**（只有 22 条样本） | E-005 |
-| 判官低温稳定 | ✅ 已修（`llm.judge_mode()`） | E-007 |
-| MAS vs SAS 三章对照 | ⚠️ 进行中，三章一个题材一个模型 | E-008 |
-| **人物状态随章推进** | ❌ **没做** —— 见下面「已知局限」 | — |
-| 文笔评价 | ❌ 没做双盲 | — |
+| 五角色 / 19 工具 / 白名单隔离 | 已实现，有测试 | `tests/selfcheck.py` 14 项 |
+| 假模型七步闭环（注入→取数→生成→过闸→打分→落盘） | 已实现 | E-001 |
+| 真模型生成可读正文 | 已实现 | E-002 |
+| 打回后自动重写 | 已实现 | E-003 |
+| 三裁判角度互补 | 已验证 | E-004 |
+| 判官准确度 | 未达标（81.8%，22 条样本） | E-005 |
+| 判官低温稳定 | 已修复（`llm.judge_mode()`） | E-007 |
+| MAS vs SAS 三章对照 | 进行中（三章、单题材、单模型） | E-008 |
+| 人物状态随章推进 | **未实现**，见「已知局限」 | — |
+| 文笔评价 | 未做双盲 | — |
 
-## 跑起来
+## 运行
 
-### 0. 自检（零依赖，不联网，不花钱）
+### 0. 自检（零依赖、不联网、无 API 费用）
 
 ```powershell
 # Windows PowerShell
@@ -137,9 +136,9 @@ cd novel-mas
 PYTHONPATH=src python tests/selfcheck.py
 ```
 
-期望看到 `通过 14 项，失败 0 项`。它验的是**结构**：库建得起来、白名单没漏、
-该拦的拿不到工具、写手没写库权限、两条纯逻辑（查环、断崖告警）对。
-**它不验功能，也不验判官准不准。**
+期望输出 `通过 14 项，失败 0 项`。该自检只校验结构：库能否建立、白名单是否遗漏、
+越权是否被拒、写手是否具备写库权限、两个纯逻辑函数（查环、断崖告警）是否正确。
+它不校验功能实现，也不校验判官准确度。
 
 ### 1. 七步闭环（假模型，不联网）
 
@@ -149,7 +148,7 @@ $env:PYTHONIOENCODING = "utf-8"
 python -m novel_mas.orchestrator
 ```
 
-它会真读库、真写库、真拦人。输出长这样：
+该流程会实际读写三个库并执行拦截。输出示例：
 
 ```
 [1] 世界观入库：3 条
@@ -162,11 +161,11 @@ python -m novel_mas.orchestrator
     是否写出了成文文件：没有（被拦下）
 ```
 
-模型是 `FakeProvider`：✅ 链路是真的；❌ 正文是占位文本，不是作品；❌ 打分是词频估计。
+模型为 `FakeProvider`：链路真实（读写库、拦截均生效）；正文为占位文本；打分为词频估计。
 
-### 2. 接真模型（OpenAI 兼容端点）
+### 2. 接入真模型（OpenAI 兼容端点）
 
-在仓库根目录放一个 `.env`：
+在仓库根目录创建 `.env`：
 
 ```ini
 DEEPSEEK_API_KEY=sk-...
@@ -175,10 +174,10 @@ NOVEL_BASE_URL=https://api.deepseek.com
 NOVEL_MODEL=deepseek-chat
 ```
 
-再实现 `Provider` 协议（只有 `complete(prompt, system)` 和 `tokens_used()` 两个成员），
-编排那七步一行不用改。判官走 `judge_mode()`（0.1），写作仍 0.8 —— 为什么，见 E-007。
+实现 `Provider` 协议即可（仅需 `complete(prompt, system)` 与 `tokens_used()` 两个成员），
+编排层不需要修改。判官走 `judge_mode()`（0.1），写作仍为 0.8；原因见 E-007。
 
-### 3. 小界面（可选，标准库 `http.server`）
+### 3. 简易界面（可选，标准库 `http.server`）
 
 ```powershell
 python -m novel_mas.web      # http://127.0.0.1:8787
@@ -187,14 +186,14 @@ python -m novel_mas.web      # http://127.0.0.1:8787
 ### 4. 逐层讲解脚本（零依赖）
 
 ```bash
-python examples/walkthrough.py      # types → 工具 → registry 的前三步
+python examples/walkthrough.py      # types → 工具 → registry
 ```
 
-> Windows 下跑 Python 一定要设 `PYTHONIOENCODING=utf-8`，否则中文输出会乱码甚至崩。
+> Windows 下运行 Python 应设置 `PYTHONIOENCODING=utf-8`，否则中文输出可能乱码或报错。
 
-## 实验证据（摘要）
+## 实验摘要
 
-### E-007：尺子会抖 —— 同一份正文（1266 字，一字没改）
+### E-007：同一份正文（1266 字，未改动）的判官温度影响
 
 | 温度 | 三次打分 | 极差 |
 |---|---|---|
@@ -202,10 +201,11 @@ python examples/walkthrough.py      # types → 工具 → registry 的前三步
 | 0.8 | 60 / 61 / 70 | 10 |
 | 0.95 | 55 / 60 / 65 | 10 |
 
-「跑章时 72 分、事后审计 55 分」不是判得不一样，是**同一把尺子在抖**；阈值 60 正好落在抖动区间。
-修法：判官 0.1、写作 0.8。**副作用：`chapter_scores` 里的历史数据都是 0.8 下量的，不能当基线。**
+「跑章时 72 分、事后审计 55 分」的原因不是判定标准变化，而是同一配置下打分波动；
+阈值 60 恰好落在波动区间内。修复方式：判官 0.1、写作 0.8。
+副作用：`chapter_scores` 中的历史数据均在 0.8 下产生，不能作为基线。
 
-### E-008：MAS vs SAS（三章，尺子全是 0.1）
+### E-008：MAS vs SAS（三章，判官均为 0.1）
 
 | | MAS | SAS |
 |---|---|---|
@@ -215,47 +215,45 @@ python examples/walkthrough.py      # types → 工具 → registry 的前三步
 | 软问题 | 5 条（0.82/千字） | 2 条（0.51/千字） |
 | 人物过闸 | 3/3 | 2/3 |
 
-**能说的**：硬伤确实被压到 0；代价是 **9.2 倍 token**（多花的钱 86% 在审查，写作只占 14%）。
-**不能说的**：不是「写得好」——软问题反而更多；三章一个题材一个模型，不能推广。
-完整限定见 [`EXPERIMENTS.md`](EXPERIMENTS.md) 的「不能得出 / 必须限定」五条。
+可以得出的结论：硬伤被压到 0，代价是 9.2 倍 token（其中 86% 消耗在审查，写作占 14%）。
+不能得出的结论：不能说明「写得更好」——软问题反而更多；三章、单题材、单模型，无法外推。
+完整限定见 [`EXPERIMENTS.md`](EXPERIMENTS.md)。
 
-## 已知局限（改之前先读这条）
+## 已知局限
 
-- **人物 `state` 不随章推进**：`characters` 表只有「初登场」那一条，`as_of_chapter` 恒为 0（甚至 None）。
-  写手第 2 章看到的人物跟第 1 章一模一样 —— **现在能写一章，写不了一部**。这是 P1，未做。
-- **判官和写手是同一个模型**：自己写、自己判，缺第三方仲裁（E-005 那条方法论问题）。
-- **判官准确率 81.8%**，没过线，样本只有 22 条。
-- **跨类冲突无检测**：三个裁判可能各自放行、合起来却互相矛盾。
-- **`judge_mode()` 是临时改共享 `llm.temperature`**：单线程安全，将来并行调用会串。
-- `book_id` 默认 `demo`，多书并存没做。
+- **人物 `state` 不随章推进**：`characters` 表只有「初登场」一条记录，`as_of_chapter` 恒为 0（或 None）。
+  写手在写第 2 章时看到的人物状态与第 1 章相同。当前实现可以生成单章，无法支撑连载长篇。列为 P1，尚未实现。
+- **判官与写手是同一模型**：自行写作、自行判定，缺少第三方仲裁（E-005 的方法论问题）。
+- **判官准确度 81.8%**，未达标，样本仅 22 条。
+- **跨类冲突无检测**：三个裁判可能各自放行，但结论互相矛盾。
+- **`judge_mode()` 通过临时修改共享 `llm.temperature` 实现**：单线程安全，并行调用会互相干扰。
+- `book_id` 默认 `demo`，不支持多书并存。
 
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
 | `src/novel_mas/agents/` | 五个 agent（world_will / character / trend / writer / acceptor） |
-| `src/novel_mas/tools/registry.py` | 工具白名单 + 权限闸门 —— **隔离的落点** |
+| `src/novel_mas/tools/registry.py` | 工具白名单与权限检查，隔离落点 |
 | `src/novel_mas/db/` | SQLite 连接与建库 |
-| `src/novel_mas/orchestrator.py` | 七步编排 + 判定链 + 重写闭环 |
+| `src/novel_mas/orchestrator.py` | 七步编排、判定链、重写闭环 |
 | `src/novel_mas/llm.py` | `Provider` 协议、`FakeProvider`、`judge_mode()`、token 记账 |
-| `src/novel_mas/web.py` | 一屏表单式的小界面（端口 8787） |
+| `src/novel_mas/web.py` | 表单式简易界面（端口 8787） |
 | `schemas/all.sql` | 三个库的建表 SQL |
 | `docs/architecture.md` | 设计取舍与已知问题 |
-| `tests/selfcheck.py` | 零依赖自检（CI 跑这个） |
-| `tests/audit_chapter.py` | 单章审计：过闸 + 三裁判打分 |
+| `tests/selfcheck.py` | 零依赖自检（CI 使用） |
+| `tests/audit_chapter.py` | 单章审计：过闸与三裁判打分 |
 | `tests/sas_baseline.py` | SAS 对照组 |
 | `tests/calibration/` | 一致性校准集（E-005） |
-| `EXPERIMENTS.md` | 实验记录：能得出什么、不能得出什么 |
+| `EXPERIMENTS.md` | 实验记录：可得出与不可得出的结论 |
 | `.archify/architecture-novelmas-v10-20261118-210500/novelmas-v10.html` | 可交互架构图 |
 
-## 想拿它学什么
+## 建议阅读顺序
 
-按这个顺序读，最快看懂：
-
-1. `src/novel_mas/tools/registry.py` —— 40 行讲清「隔离怎么变成一条 `PermissionError`」
-2. `tests/selfcheck.py` —— 把「隔离」写成 4 条断言，CI 每推一次跑一遍
-3. `src/novel_mas/orchestrator.py` 的 `write_chapter()` —— 判定链、重写预算、仲裁时机
-4. `EXPERIMENTS.md` —— 一个失败的实验（E-005）和一个「先怀疑尺子」的排查（E-007）
+1. `src/novel_mas/tools/registry.py`：隔离如何变成一条 `PermissionError`
+2. `tests/selfcheck.py`：如何把隔离写成可重复执行的断言
+3. `src/novel_mas/orchestrator.py` 的 `write_chapter()`：判定链、重写预算、仲裁时机
+4. `EXPERIMENTS.md`：E-005 的失败结论与 E-007 的排查过程
 
 ## 许可
 

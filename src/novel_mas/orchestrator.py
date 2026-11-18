@@ -1,14 +1,14 @@
 r"""最小闭环 —— 编排者（orchestrator）。
 
-它做的事，就是把这七步串起来：
+它做的事，就是把这七步串起来。**每一步都走 registry.call，没有一处直连库**：
 
-    1. 定文风
-    2. 取本章曲线（目标分 + 容忍带）
-    3. 取人物快照
-    4. 取世界观条目 + 本章硬约束
-    5. 让模型写正文
-    6. 世界意志过闸
-    7. 走向打分 → 落库 → 写出文件
+    1. 定文风          writer.set_style
+    2. 取本章曲线       writer.get_curve
+    3. 取人物快照       writer.get_characters
+    4. 取世界观条目      writer.get_worldview
+    5. 让模型写正文      llm.complete（这一步不是工具，是写手的笔）
+    6. 世界意志过闸      world_will.check_consistency
+    7. 走向打分 → 落库   trend.score_direction
 
 跑法：
     $env:PYTHONPATH = 'E:\novel-mas\src'
@@ -17,8 +17,12 @@ r"""最小闭环 —— 编排者（orchestrator）。
 
 设计原则：
     - 用假模型也能跑通（不花钱、可重复）
-    - 每一步都真的读写库，不是演示
+    - 每一步都真的走工具、真的读写库，不是演示
     - 打回时把「失分项」写清楚，别只说不行
+
+2026-11-18 改：这里原来有一整套私有副本（_get_curve / _get_characters /
+_get_worldview / _judge / _score），跟 agent 里的工具重了一遍，
+结果 16 个工具都验过了却没人用。现在全部换成 registry.call。
 """
 
 from __future__ import annotations
@@ -27,15 +31,14 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
+from .agents import bootstrap
 from .db import base as db
 from .llm import FakeProvider, Provider
+from .tools.registry import ToolRegistry
+from .types import TrendVerdict, Verdict
 
 OUT_DIR = Path(__file__).resolve().parents[2] / "data" / "out"
-
-POSITIVE = ("重逢", "温暖", "一起", "笑", "归来", "灯火", "光", "雨停")
-NEGATIVE = ("死", "别离", "毁", "血", "断", "哭", "冷", "埋")
 
 
 def _now() -> str:
@@ -46,7 +49,8 @@ def _now() -> str:
 class WriteResult:
     chapter: int
     text: str
-    verdict: str            # pass | soft_warn | violated
+    verdict: str            # 过闸结果：pass | violated（拦没拦）
+    trend_verdict: str      # 走向判定：on_track | drifted | violated（偏没偏）
     score: int
     target: int
     deviation: int
@@ -56,7 +60,7 @@ class WriteResult:
 
     def brief(self) -> str:
         lines = [
-            f"第 {self.chapter} 章 · {self.verdict.upper()}",
+            f"第 {self.chapter} 章 · 过闸 {self.verdict.upper()} / 走向 {self.trend_verdict}",
             f"  走向分 {self.score} / 目标 {self.target}（偏差 {self.deviation:+d}）",
             f"  用掉 token {self.tokens}",
         ]
@@ -77,8 +81,14 @@ class Orchestrator:
         self.llm: Provider = llm or FakeProvider()
         self.style = "日常"
         db.migrate()
+        # 每个编排者用**自己的** registry：bootstrap 默认的那个是全局单例，
+        # 先用假模型建过一轮之后，再换真模型也会拿回旧的（闭包里绑着假模型）。
+        # book_id 必须一起传下去 —— 不然三个 agent 全去读 demo 那本书。
+        self.registry = bootstrap(
+            ToolRegistry(), llm=self.llm, book_id=self.book_id
+        )
 
-    # ---------------- 配置阶段 ----------------
+    # ---------------- 配置阶段（这三步是人在配，不是每章都跑） ----------------
 
     def ingest_worldview(self, prompt: str) -> int:
         """把一段世界观拆成条目入库。简化版：按句拆，不调模型。"""
@@ -88,9 +98,20 @@ class Orchestrator:
         try:
             for i, body in enumerate(parts, 1):
                 conn.execute(
-                    "INSERT INTO world_bible(category,title,body,version,source,created_at)"
-                    " VALUES(?,?,?,?,?,?)",
-                    ("规则", f"条目{i}", body, 1, "user_inject", _now()),
+                    # OR REPLACE：重灌世界观是覆盖，不是一路追加。
+                    # 之前是纯 INSERT，跑六次就堆出六份同样的三条。
+                    "INSERT OR REPLACE INTO world_bible"
+                    "(book_id,category,title,body,version,source,created_at)"
+                    " VALUES(?,?,?,?,?,?,?)",
+                    (
+                        self.book_id,
+                        "规则",
+                        f"条目{i}",
+                        body,
+                        1,
+                        "user_inject",
+                        _now(),
+                    ),
                 )
                 n += 1
             conn.commit()
@@ -143,81 +164,7 @@ class Orchestrator:
         finally:
             conn.close()
 
-    # ---------------- 取数阶段（写手的四个工具，真读库） ----------------
-
-    def _get_curve(self, chapter: int) -> tuple[int, int]:
-        conn = db.connect("trend.db")
-        try:
-            row = conn.execute(
-                "SELECT target,tolerance FROM curve WHERE book_id=? AND chapter=?",
-                (self.book_id, chapter),
-            ).fetchone()
-        finally:
-            conn.close()
-        if row is None:
-            raise LookupError(f"没有第 {chapter} 章的曲线")
-        return row["target"], row["tolerance"]
-
-    def _get_characters(self) -> list[dict[str, Any]]:
-        conn = db.connect("char.db")
-        try:
-            rows = conn.execute(
-                "SELECT name,importance,profile,state FROM characters WHERE book_id=?",
-                (self.book_id,),
-            ).fetchall()
-        finally:
-            conn.close()
-        return [dict(r) for r in rows]
-
-    def _get_worldview(self) -> tuple[list[str], list[str]]:
-        conn = db.connect("world.db")
-        try:
-            entries = [
-                r["body"]
-                for r in conn.execute(
-                    "SELECT body FROM world_bible ORDER BY id"
-                ).fetchall()
-            ]
-        finally:
-            conn.close()
-
-        conn = db.connect("trend.db")
-        try:
-            row = conn.execute(
-                "SELECT hard_constraints FROM ending_intent WHERE book_id=?",
-                (self.book_id,),
-            ).fetchone()
-        finally:
-            conn.close()
-        hard = json.loads(row["hard_constraints"]) if row and row["hard_constraints"] else []
-        return entries, hard
-
-    # ---------------- 判官（简化版，不调模型） ----------------
-
-    @staticmethod
-    def _judge(text: str, hard_constraints: list[str]) -> tuple[str, list[str]]:
-        """三级裁决的简化实现：硬约束里提到"不能死"，正文出现"死"就违例。"""
-        violations: list[str] = []
-        for rule in hard_constraints:
-            if "不能死" in rule and "死" in text:
-                violations.append(f"违反硬约束「{rule}」：正文出现了『死』")
-            if "不能离开" in rule and "离开" in text:
-                violations.append(f"违反硬约束「{rule}」")
-        if violations:
-            return "violated", violations
-        return "pass", []
-
-    @staticmethod
-    def _score(text: str) -> tuple[int, list[str]]:
-        """走向分：高=暖，低=冷。这里用词频做极简估计。"""
-        pos = sum(text.count(w) for w in POSITIVE)
-        neg = sum(text.count(w) for w in NEGATIVE)
-        raw = 50 + (pos - neg) * 10
-        score = max(0, min(100, raw))
-        ev = [f"暖词 {pos} 个 / 冷词 {neg} 个"]
-        return score, ev
-
-    # ---------------- 写一章 ----------------
+    # ---------------- 写一章（七步全走工具） ----------------
 
     def write_chapter(
         self,
@@ -225,54 +172,98 @@ class Orchestrator:
         brief: str,
         mock_text: str | None = None,
     ) -> WriteResult:
-        style = self.style
-        target, tol = self._get_curve(chapter)
-        chars = self._get_characters()
-        entries, hard = self._get_worldview()
+        reg, book = self.registry, self.book_id
 
+        # 1. 定文风
+        style = reg.call("writer", "set_style", book_id=book, preset=self.style)["resolved"]
+
+        # 2. 取本章曲线
+        curve = reg.call("writer", "get_curve", book_id=book, chapter=chapter)
+
+        # 3. 取人物快照
+        chars = reg.call("writer", "get_characters", book_id=book)
+
+        # 4. 取世界观 + 硬约束
+        wv = reg.call("writer", "get_worldview", book_id=book)
+        entries, constraints = wv["entries"], wv["constraints"]
+
+        # 5. 写正文（这一步是写手的笔，不是工具）
         char_block = "\n".join(
-            f"- {c['name']}（{c['importance']}）：{c['profile']}；当前 {c['state']}"
+            f"- {c.name}（{c.importance}）：{c.profile}；当前 {c.state}"
             for c in chars
         ) or "- （无人物档）"
-        world_block = "\n".join(f"- {e}" for e in entries) or "- （无世界观）"
+        world_block = "\n".join(f"- {e['body']}" for e in entries) or "- （无世界观）"
 
         prompt = (
             f"【文风】{style}\n"
-            f"【本章目标】第 {chapter} 章，走向分目标 {target}（容差 ±{tol}）\n"
+            f"【本章目标】第 {chapter} 章，走向分目标 {curve.target}"
+            f"（容差 ±{curve.tolerance}）\n"
             f"【大纲】{brief}\n"
             f"【人物】\n{char_block}\n"
             f"【世界观】\n{world_block}\n"
-            f"【硬约束】{hard}\n"
+            f"【硬约束】{constraints or '无'}\n"
             f"请写这一章的正文。"
         )
-
         text = mock_text if mock_text is not None else self.llm.complete(prompt)
-        verdict, evidence = self._judge(text, hard)
-        score, score_ev = self._score(text)
-        deviation = score - target
 
-        # 打分工具的三级判定
-        if verdict == "violated":
-            trend_verdict = "violated"
-        elif abs(deviation) > tol:
-            trend_verdict = "drifted"
-        else:
-            trend_verdict = "on_track"
+        # 6. 世界意志过闸（真推理，不是关键词）
+        judgment = reg.call(
+            "world_will", "check_consistency", claim=text, chapter=chapter
+        )
 
+        # 7. 走向打分（模型抽事件 + Python 按口径算分）
+        scored = reg.call(
+            "trend", "score_direction", book_id=book, text=text, chapter=chapter
+        )
+
+        # 拦不拦：三个裁判（世界 / 走向）**任一说撞了就拦**。
+        # 光看世界裁判会漏 —— 走向裁判自己也有一套撞约束检查（_check_violated），
+        # 它判 violated 而世界裁判说 pass 时，以前会：返回 pass、成文落盘、库里存 violated。
+        # 两个裁判独立判、各自可能漏，所以取并集，不取交集。
+        blocked = (
+            judgment.verdict is Verdict.HARD_CONFLICT
+            or scored.verdict is TrendVerdict.VIOLATED
+        )
+
+        evidence = [f"过闸 {judgment.verdict.value}：{judgment.reason}"]
+        evidence += [
+            f"事件 {e['kind']}（{e['weight']:+d}）：{e['what']}" for e in scored.evidence
+        ]
+        if scored.violated_constraints:
+            evidence += [f"撞约束：{v}" for v in scored.violated_constraints]
+
+        # 落库：一章一条，重跑就覆盖。
+        # 判定以**过闸**为准：被拦下的章，走向分再正常也是 violated。
+        # 否则库里会写着 on_track，而正文其实被拦了——查历史的人会被骗。
+        #
+        # 这一处是编排层唯一直连库的地方，**不是漏改**：
+        # chapter_scores 记的是「编排历史」（第几章跑过、得了几分），
+        # 不是任何 agent 的领地。三个 agent 谁都不该写这张表。
+        #
+        # 用 ON CONFLICT：库里已经有 UNIQUE(book_id, chapter) 兜底，
+        # 不再靠「先 DELETE 再 INSERT」这种自觉写法（那正是 8 条重复的来源）。
+        final_verdict = "violated" if blocked else scored.verdict.value
         conn = db.connect("trend.db")
         try:
             conn.execute(
                 "INSERT INTO chapter_scores"
                 "(book_id,chapter,score,target,deviation,verdict,evidence,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?)",
+                " VALUES(?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(book_id, chapter) DO UPDATE SET"
+                "   score     = excluded.score,"
+                "   target    = excluded.target,"
+                "   deviation = excluded.deviation,"
+                "   verdict   = excluded.verdict,"
+                "   evidence  = excluded.evidence,"
+                "   created_at= excluded.created_at",
                 (
-                    self.book_id,
+                    book,
                     chapter,
-                    score,
-                    target,
-                    deviation,
-                    trend_verdict,
-                    json.dumps(evidence + score_ev, ensure_ascii=False),
+                    scored.score,
+                    scored.target,
+                    scored.deviation,
+                    final_verdict,
+                    json.dumps(evidence, ensure_ascii=False),
                     _now(),
                 ),
             )
@@ -280,32 +271,9 @@ class Orchestrator:
         finally:
             conn.close()
 
-        # 小事件落库（本章发生了什么）
-        conn = db.connect("world.db")
-        try:
-            conn.execute(
-                "INSERT INTO events"
-                "(book_id,kind,title,summary,chapter,constraints,caused_by,source,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
-                (
-                    self.book_id,
-                    "minor",
-                    f"第{chapter}章正文成稿",
-                    brief[:80],
-                    chapter,
-                    None,
-                    None,
-                    "writer",
-                    _now(),
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        # 落盘（只有过闸才写出成文）
+        # 落盘：只有过闸才写成文
         out_path = None
-        if verdict == "pass":
+        if not blocked:
             OUT_DIR.mkdir(parents=True, exist_ok=True)
             p = OUT_DIR / f"ch{chapter:02d}.txt"
             p.write_text(text, encoding="utf-8")
@@ -314,12 +282,13 @@ class Orchestrator:
         return WriteResult(
             chapter=chapter,
             text=text,
-            verdict=verdict if trend_verdict != "violated" else "violated",
-            score=score,
-            target=target,
-            deviation=deviation,
+            verdict="violated" if blocked else "pass",
+            trend_verdict=scored.verdict.value,
+            score=scored.score,
+            target=scored.target,
+            deviation=scored.deviation,
             tokens=self.llm.tokens_used,
-            evidence=evidence + score_ev,
+            evidence=evidence,
             out_path=out_path,
         )
 
@@ -353,7 +322,6 @@ def main() -> None:
     print("\n[4] 写第 1 章（正常）")
     r1 = orc.write_chapter(1, "李三在巷口捡到一枚铜钱，抬头看见钟楼上有个人影。")
     print(r1.brief())
-    print("  正文开头：", r1.text.splitlines()[-1][:40], "...")
 
     print("\n[5] 写第 2 章（故意踩硬约束，看它拦不拦）")
     r2 = orc.write_chapter(
@@ -366,7 +334,7 @@ def main() -> None:
 
     print("\n" + "=" * 62)
     print("闭环跑完。四件事都真的发生了：")
-    print("  - 三个库都有新数据")
+    print("  - 每一章都走 registry.call，七步没有一处直连库")
     print("  - 第 1 章过闸并落盘")
     print("  - 第 2 章踩了「李三不能死」被拦，没有落盘")
     print("  - 打分和历史都记在 chapter_scores 里")

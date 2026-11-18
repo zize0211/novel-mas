@@ -49,6 +49,36 @@ def _split_schema() -> dict[str, str]:
     return out
 
 
+def _upgrade(conn: sqlite3.Connection, name: str) -> None:
+    """给老库补新列。
+
+    CREATE TABLE IF NOT EXISTS 只对**不存在**的表生效 —— 已经建过的表
+    不会因为改了 all.sql 就长出新的列。所以升级得单独写。
+    """
+    if name != "world.db":
+        return
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(world_bible)")}
+    if "book_id" not in cols:
+        # 补列时已有数据全归到 demo：加这一列之前只有一本书。
+        conn.execute(
+            "ALTER TABLE world_bible"
+            " ADD COLUMN book_id TEXT NOT NULL DEFAULT 'demo'"
+        )
+        conn.commit()
+
+    # 同一本书里标题唯一。建索引前必须先清重复，否则索引建不上。
+    conn.execute(
+        "DELETE FROM world_bible WHERE id NOT IN ("
+        "  SELECT MAX(id) FROM world_bible GROUP BY book_id, title)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_world_bible_title"
+        " ON world_bible(book_id, title)"
+    )
+    conn.commit()
+
+
 def migrate(verbose: bool = False) -> dict[str, int]:
     """建/更新三个库，返回每个库执行了多少条语句。"""
     sections = _split_schema()
@@ -61,6 +91,7 @@ def migrate(verbose: bool = False) -> dict[str, int]:
         try:
             cur = conn.executescript(sql)
             conn.commit()
+            _upgrade(conn, name)
             result[name] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         finally:
             conn.close()

@@ -23,10 +23,12 @@ class BaseAgent:
         return db.connect(self.db_name)
 
 
-def bootstrap(registry=None):
+def bootstrap(registry=None, llm=None, book_id: str = "demo"):
     """把四个 agent 的工具都注册到 registry，返回 registry。
 
     编排层（orchestrator）启动时调一次。
+    llm 给要判语义的三个 agent 用；不传就是没接模型，调那些工具时才报错。
+    book_id 必须传：三个 agent 都按书取数据，不传就全读 demo 那本书。
     """
     from ..tools.registry import ToolRegistry, registry as default_registry
 
@@ -36,9 +38,9 @@ def bootstrap(registry=None):
 
     from . import character, trend, world_will, writer
 
-    world_will.bind(reg)
-    character.bind(reg)
-    trend.bind(reg)
+    world_will.bind(reg, llm, book_id)
+    character.bind(reg, llm, book_id)
+    trend.bind(reg, llm, book_id)
     writer.bind(reg)
 
     missing = reg.check_coverage()

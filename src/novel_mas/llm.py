@@ -12,7 +12,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 
@@ -43,6 +48,39 @@ class FakeProvider:
     def complete(self, prompt: str, system: str = "") -> str:
         self._tokens += max(1, (len(prompt) + len(system)) // 2)
 
+        # 假模型也要认得「要 JSON」的请求，否则判官工具在假模型下直接炸，
+        # 「用假模型也能跑通」这条设计原则就断了。
+        # 返回的每个值都标「假模型」，一眼看得出这不是判断结果。
+        if "只输出 JSON" in system or "只输出 JSON" in prompt:
+            # 它不会推理，只做字符串匹配 —— 够让闭环演示「拦 / 不拦」两条路。
+            # 真判断在 OpenAIProvider 那边；跑真模型时这段完全不参与。
+            lead = prompt.split("【待判剧情】")[-1] if "【待判剧情】" in prompt else ""
+            dies = ("死" in lead) and ("没有死" not in lead)
+            return json.dumps(
+                {
+                    "verdict": "hard_conflict" if dies else "pass",
+                    "reason": (
+                        "[假模型] 待判段落里匹配到「死」，且不是否定句"
+                        if dies
+                        else "[假模型] 没匹配到违禁词，放行"
+                    ),
+                    "score": 60,
+                    "events": [],
+                    "findings": [],
+                    "self": {"score": 60, "reason": "[假模型]"},
+                    "others": {"score": 60, "reason": "[假模型]"},
+                    "reader": {"score": 60, "reason": "[假模型]"},
+                    "violations": [],
+                    "constraints": [],
+                    "ending_type": "happy",
+                    "target_score": 60,
+                    "hard_constraints": [],
+                    "soft_preferences": [],
+                    "points": [],
+                },
+                ensure_ascii=False,
+            )
+
         seed = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:6]
         tone = "暖" if sum(prompt.count(w) for w in self.POSITIVE) >= sum(
             prompt.count(w) for w in self.NEGATIVE
@@ -71,6 +109,120 @@ class EchoProvider:
     def complete(self, prompt: str, system: str = "") -> str:
         self._tokens += len(prompt) // 4
         return f"[ECHO] {prompt[:200]}"
+
+    @property
+    def tokens_used(self) -> int:
+        return self._tokens
+
+
+def parse_json_block(text: str) -> dict:
+    """从模型回复里抠 JSON。容错：带 ```json 围栏、前后夹废话。
+
+    放在 llm 模块里，因为「模型输出不干净」是通用问题，不只世界意志会遇到。
+    """
+    s = text.strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[1] if "\n" in s else s
+        if s.endswith("```"):
+            s = s[:-3]
+    i, j = s.find("{"), s.rfind("}")
+    if i < 0 or j <= i:
+        raise ValueError(f"模型没给 JSON：{text[:200]}")
+    return json.loads(s[i:j + 1])
+
+
+def _load_dotenv(path: str = ".env") -> None:
+    """把 .env 读进 os.environ。没有这个文件就静默跳过。
+
+    为什么自己写：装 python-dotenv 就破坏零依赖。
+    只支持最简单的 KEY=VALUE——多行、转义那些复杂格式不该塞进 key 文件。
+    """
+    p = Path(path)
+    if not p.is_file():
+        return
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        # setdefault：已经在环境变量里的优先，.env 不覆盖它
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+@dataclass
+class OpenAIProvider:
+    """真模型：按 OpenAI 的 /v1/chat/completions 规范接。
+
+    为什么不用 openai sdk：项目现在是 dependencies = []，零依赖，装起来不用等。
+    标准库 urllib 够用——一次 POST，读 JSON，取 content。
+
+    兼容面：任何讲这套协议的服务都能接（OpenAI / DeepSeek / 本地 vLLM / Ollama 的
+    OpenAI 兼容端点），换的只是 base_url 和 model。
+    """
+
+    api_key: str = field(default="", repr=False)   # repr 里不显示，免得日志泄露
+    model: str = "deepseek-chat"
+    base_url: str = "https://api.deepseek.com/v1"
+    temperature: float = 0.8
+    timeout: int = 120
+    _tokens: int = field(default=0, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.api_key:
+            raise ValueError("api_key 不能为空；用 OpenAIProvider.from_env() 从环境变量取")
+
+    @classmethod
+    def from_env(cls) -> "OpenAIProvider":
+        """从环境变量建。key 不进代码、不进 git。"""
+        _load_dotenv()          # 先把 .env 捞进来，再读环境变量
+        key = (
+            os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("DEEPSEEK_API_KEY")
+            or ""
+        ).strip()
+        if not key:
+            raise RuntimeError(
+                "没找到 API key：先设 OPENAI_API_KEY 或 DEEPSEEK_API_KEY"
+            )
+        return cls(
+            api_key=key,
+            model=os.environ.get("NOVEL_MODEL", "deepseek-chat"),
+            base_url=os.environ.get("NOVEL_BASE_URL", "https://api.deepseek.com/v1"),
+        )
+
+    def complete(self, prompt: str, system: str = "") -> str:
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+        }
+        req = urllib.request.Request(
+            f"{self.base_url.rstrip('/')}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")[:400]
+            raise RuntimeError(f"模型返回 HTTP {exc.code}：{body}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"连不上模型 {self.base_url}：{exc.reason}") from exc
+
+        usage = data.get("usage") or {}
+        self._tokens += int(usage.get("total_tokens") or 0)
+        return data["choices"][0]["message"]["content"]
 
     @property
     def tokens_used(self) -> int:

@@ -12,3 +12,8 @@ __pycache__/
 # 编辑器
 .vscode/
 .idea/
+
+# 凭据（2026-11-18 加：key 只走环境变量，别让 .env 有机会进 git）
+.env
+.env.*
+*.key

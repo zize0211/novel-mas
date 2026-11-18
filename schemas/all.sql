@@ -2,12 +2,15 @@
 
 CREATE TABLE IF NOT EXISTS world_bible (
   id          INTEGER PRIMARY KEY,
+  book_id     TEXT NOT NULL,              -- 哪本书的世界观：两本书不共用设定
   category    TEXT NOT NULL,              -- 地理/势力/人物/规则/历史/禁忌
   title       TEXT NOT NULL,
   body        TEXT NOT NULL,
   version     INTEGER NOT NULL DEFAULT 1,
   source      TEXT NOT NULL,              -- user_inject | world_will
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  -- 同一本书里标题唯一：重灌世界观应该是覆盖，不是一路追加。
+  UNIQUE(book_id, title)
 );
 
 -- 大事件：必须带 constraints（它锁死了什么）
@@ -91,7 +94,9 @@ CREATE TABLE IF NOT EXISTS relationships (
   kind       TEXT NOT NULL,               -- 敌/友/亏欠/亲缘
   intensity  INTEGER NOT NULL DEFAULT 5,  -- 1..10
   as_of_chapter INTEGER,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- 两个人之间同一种关系只该有一条。方向按 a→b 定，反向存成另一行是有意为之。
+  UNIQUE(book_id, a, b, kind)
 );
 
 CREATE TABLE IF NOT EXISTS arc_events (
@@ -141,5 +146,7 @@ CREATE TABLE IF NOT EXISTS chapter_scores (
   deviation  INTEGER,
   verdict    TEXT NOT NULL,               -- on_track|drifted|violated
   evidence   TEXT,                        -- JSON
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- 一章只留一条成绩。重跑同一章要覆盖，不是并排堆两条。
+  UNIQUE(book_id, chapter)
 );

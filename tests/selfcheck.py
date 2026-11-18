@@ -68,7 +68,7 @@ check("白名单无遗漏", lambda: (_ for _ in ()).throw(AssertionError(reg.che
 
 
 def _counts() -> None:
-    assert len(reg.names_for("world_will")) == 5
+    assert len(reg.names_for("world_will")) == 6
     assert len(reg.names_for("character")) == 3
     assert len(reg.names_for("trend")) == 3
     assert len(reg.names_for("writer")) == 5

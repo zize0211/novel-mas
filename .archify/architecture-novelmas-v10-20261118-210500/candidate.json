@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "novel-mas V10 架构",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-novelmas-v10-20261118-210500/novelmas-v10.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "author", "type": "external", "label": "作者", "sublabel": "给大纲", "pos": [455, 30], "size": [120, 60] },
+    { "id": "orch", "type": "backend", "label": "编排层", "sublabel": "write_chapter", "pos": [425, 150], "size": [180, 90] },
+    { "id": "out", "type": "external", "label": "data/out", "sublabel": "chNN.txt", "pos": [670, 95], "size": [150, 80] },
+    { "id": "writer", "type": "backend", "label": "写手", "sublabel": "5 个只读工具", "pos": [70, 320], "size": [150, 70] },
+    { "id": "world", "type": "security", "label": "世界意志", "sublabel": "check_consistency", "pos": [255, 320], "size": [150, 70] },
+    { "id": "char", "type": "backend", "label": "人物控制", "sublabel": "score_in_character", "pos": [440, 320], "size": [150, 70] },
+    { "id": "trend", "type": "backend", "label": "世界走向", "sublabel": "score_direction", "pos": [625, 320], "size": [150, 70] },
+    { "id": "acc", "type": "security", "label": "验收 agent", "sublabel": "仲裁 + 改写指令", "pos": [810, 320], "size": [150, 70] },
+    { "id": "db_world", "type": "database", "label": "world.db", "sublabel": "世界观 + 事件", "pos": [255, 500], "size": [150, 60] },
+    { "id": "db_char", "type": "database", "label": "char.db", "sublabel": "人物", "pos": [440, 500], "size": [150, 60] },
+    { "id": "db_trend", "type": "database", "label": "trend.db", "sublabel": "曲线 + 打分史", "pos": [625, 500], "size": [150, 60] }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "工具白名单 ROLE_TOOLS · 越权抛 PermissionError",
+      "wraps": ["writer", "world", "char", "trend", "acc"],
+      "pad": 30
+    },
+    {
+      "kind": "region",
+      "label": "三库分权 · 各管各的，只读角色跨库不许写",
+      "wraps": ["db_world", "db_char", "db_trend"],
+      "pad": 30
+    }
+  ],
+  "connections": [
+    { "id": "author-plan", "from": "author", "to": "orch", "label": "大纲", "fromSide": "bottom", "toSide": "top" },
+    { "id": "orch-out", "from": "orch", "to": "out", "label": "落盘", "fromSide": "right", "toSide": "left" },
+    { "id": "orch-write", "from": "orch", "to": "writer", "label": "写正文" },
+    { "id": "orch-check", "from": "orch", "to": "world", "label": "过闸" },
+    { "id": "orch-char", "from": "orch", "to": "char", "label": "评人物" },
+    { "id": "orch-trend", "from": "orch", "to": "trend", "label": "打分" },
+    { "id": "orch-arb", "from": "orch", "to": "acc", "label": "仲裁", "fromSide": "right", "toSide": "top", "variant": "security" },
+    { "id": "world-db", "from": "world", "to": "db_world", "label": "判" },
+    { "id": "char-db", "from": "char", "to": "db_char" },
+    { "id": "trend-db", "from": "trend", "to": "db_trend" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "隔离",
+      "items": [
+        "五个角色各自只有白名单里的工具，越权直接抛 PermissionError",
+        "写手的 5 个工具全是只读，can_write_db('writer') 为 False",
+        "selfcheck 14 项里有 5 项专测隔离，不是靠注释保证"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "验收（V10 新增）",
+      "items": [
+        "三裁判各管一摊：规则 / 人设 / 方向。各过不代表能交",
+        "acceptor 跨三库只读，一个人把三样看完再开口",
+        "三裁判打架、或一致不过时，由它裁 + 给可执行的改写指令",
+        "全过不调它，改写次数用尽也不调 —— 两处省钱"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "数据",
+      "items": [
+        "world.db：世界观条目 + 事件。大事件必须带 constraints（否证式记忆）",
+        "char.db：人物档案 + 打分阈值",
+        "trend.db：曲线、结局意图、章节打分历史",
+        "编排层唯一直连库的地方是 chapter_scores，记的是编排历史"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "实测",
+      "items": [
+        "真模型跑过 1 章，1328 字，过闸 pass",
+        "一致性校准集 22 条：三档 81.8%（没过 85% 线）/ 二档 90.9%",
+        "验收仲裁一次 1768 token，改写指令给到引文级",
+        "没有做 MAS vs SAS 对照实验，不主张写得更好"
+      ]
+    }
+  ]
+}

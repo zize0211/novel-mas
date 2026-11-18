@@ -49,6 +49,10 @@
 | `src/novel_mas/tools/` | 工具注册表 + 权限控制 + 校验守卫 |
 | `src/novel_mas/db/` | SQLite 连接与建库 |
 | `tests/` | 冒烟测试 |
+| `.archify/` | 架构图（可交互 HTML，浏览器打开） |
+
+架构图：`.archify/architecture-novelmas-v10-20261118-210500/novelmas-v10.html`
+——五个角色、四道权限边界、三库分权、验收链，一张图看完。
 
 ## 跑起来
 

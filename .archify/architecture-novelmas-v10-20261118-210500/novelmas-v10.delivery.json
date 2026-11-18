@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "7a9d9686-fed0-4964-8093-991d43616a02",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "E:\\novel-mas\\.archify\\architecture-novelmas-v10-20261118-210500\\candidate.json",
+  "output": "E:\\novel-mas\\.archify\\architecture-novelmas-v10-20261118-210500\\novelmas-v10.html",
+  "specification": {
+    "sha256": "f870e094f93a2b4bc96cdd11915d00693ccccdd83cb5392b961bda9efcc14104",
+    "bytes": 4575
+  },
+  "artifact": {
+    "sha256": "2900cb617b43cff990955cd930ce6d6042e93b690ee302cc5f75e443aebcb640",
+    "bytes": 766142
+  }
+}

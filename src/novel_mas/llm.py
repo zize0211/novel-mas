@@ -16,9 +16,32 @@ import json
 import os
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Iterator, Protocol, runtime_checkable
+
+
+@contextmanager
+def metered(cost: dict[str, int], label: str, llm) -> Iterator[None]:
+    """记一段调用的 token 开销，按角色分开算。
+
+    用法：
+        with metered(cost, "world_will", llm):
+            verdict = reg.call("world_will", "check_consistency", ...)
+
+    为什么需要它：tokens_used 只有一个总数，说不清是哪个角色花的。
+    而「多花的钱是花在写作上，还是花在审查上」正是要回答的问题 ——
+    只报一个 3495，等于什么都没说。
+
+    finally 里记：即使中途抛异常，花掉的钱也算数。
+    """
+    before = getattr(llm, "tokens_used", 0)
+    try:
+        yield
+    finally:
+        after = getattr(llm, "tokens_used", 0)
+        cost[label] = cost.get(label, 0) + (after - before)
 
 
 @runtime_checkable

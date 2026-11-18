@@ -34,7 +34,7 @@ from pathlib import Path
 
 from .agents import bootstrap
 from .db import base as db
-from .llm import FakeProvider, Provider
+from .llm import FakeProvider, Provider, metered
 from .tools.registry import ToolRegistry
 from .types import Event, EventKind, TrendVerdict, Verdict
 
@@ -57,6 +57,9 @@ class WriteResult:
     tokens: int
     evidence: list[str] = field(default_factory=list)
     out_path: str | None = None
+    # token 按角色分账。只报一个总数，说不清钱花在哪 ——
+    # 而「多花的钱是花在写作上，还是花在审查上」正是要回答的问题。
+    cost_by_role: dict[str, int] = field(default_factory=dict)
 
     def brief(self) -> str:
         lines = [
@@ -64,6 +67,14 @@ class WriteResult:
             f"  走向分 {self.score} / 目标 {self.target}（偏差 {self.deviation:+d}）",
             f"  用掉 token {self.tokens}",
         ]
+        # 分账只列真花了钱的（取数类工具不调模型，永远是 0，不占行）
+        spent = [
+            f"{k} {v}"
+            for k, v in sorted(self.cost_by_role.items(), key=lambda kv: -kv[1])
+            if v
+        ]
+        if spent:
+            lines.append("  分账：" + " / ".join(spent))
         if self.evidence:
             lines.append("  证据：")
             for e in self.evidence:
@@ -219,24 +230,27 @@ class Orchestrator:
         attempts = 0
         blocked = False                  # 循环里会重算，先给个底
         arbitrations: list[dict] = []    # 仲裁记录（可能有多次重写）
+        cost: dict[str, int] = {}        # token 按角色分账：多花的钱花在写作还是审查？
 
         for attempt in range(retry_budget + 1):
             attempts = attempt + 1
-            text = (
-                mock_text
-                if mock_text is not None
-                else self.llm.complete(base_prompt + feedback)
-            )
+            if mock_text is not None:
+                text = mock_text
+            else:
+                with metered(cost, "writer", self.llm):
+                    text = self.llm.complete(base_prompt + feedback)
 
             # 6. 世界意志过闸（真推理，不是关键词）
-            judgment = reg.call(
-                "world_will", "check_consistency", claim=text, chapter=chapter
-            )
+            with metered(cost, "world_will", self.llm):
+                judgment = reg.call(
+                    "world_will", "check_consistency", claim=text, chapter=chapter
+                )
 
             # 7. 走向打分（模型抽事件 + Python 按口径算分）
-            scored = reg.call(
-                "trend", "score_direction", book_id=book, text=text, chapter=chapter
-            )
+            with metered(cost, "trend", self.llm):
+                scored = reg.call(
+                    "trend", "score_direction", book_id=book, text=text, chapter=chapter
+                )
 
             # 8. 人物裁判：只评 lead（主角级）。support/minor 不评，省调用。
             #
@@ -247,16 +261,17 @@ class Orchestrator:
             for c in chars:
                 if c.importance != "lead":
                     continue
-                char_reviews.append(
-                    reg.call(
-                        "character",
-                        "score_in_character",
-                        book_id=book,
-                        name=c.name,
-                        text=text,
-                        chapter=chapter,
+                with metered(cost, "character", self.llm):
+                    char_reviews.append(
+                        reg.call(
+                            "character",
+                            "score_in_character",
+                            book_id=book,
+                            name=c.name,
+                            text=text,
+                            chapter=chapter,
+                        )
                     )
-                )
 
             # 拦不拦：硬裁判（世界 / 走向）**任一说撞了就拦**。
             # 光看世界裁判会漏 —— 走向裁判自己也有一套撞约束检查（_check_violated），
@@ -295,38 +310,41 @@ class Orchestrator:
             # 为什么不自己拼：三个裁判各说各的，写手拿到会懵
             # （世界说 pass，人物说不行，听谁的？）。
             # 收敛成一条可执行的改写指令，是仲裁者的活。
-            arbitration = reg.call(
-                "acceptor",
-                "arbitrate",
-                chapter=chapter,
-                text=text,
-                brief=brief,
-                judgments=[
-                    {
-                        "judge": "world_will",
-                        "verdict": judgment.verdict.value,
-                        "reason": judgment.reason,
-                    },
-                    {
-                        "judge": "trend",
-                        "verdict": scored.verdict.value,
-                        "reason": (
-                            f"{scored.score} 分 / 目标 {scored.target}"
-                            f"（偏差 {scored.deviation:+d}）"
-                        ),
-                        "violations": scored.violated_constraints,
-                    },
-                ]
-                + [
-                    {
-                        "judge": f"character:{r['name']}",
-                        "verdict": "过" if r["passed"] else "不过",
-                        "reason": r["reason"],
-                        "violations": r["violations"],
-                    }
-                    for r in char_reviews
-                ],
-            )
+            # 先把三份意见整理好，再请它裁 —— 这样计数只包住一次调用
+            judge_list = [
+                {
+                    "judge": "world_will",
+                    "verdict": judgment.verdict.value,
+                    "reason": judgment.reason,
+                },
+                {
+                    "judge": "trend",
+                    "verdict": scored.verdict.value,
+                    "reason": (
+                        f"{scored.score} 分 / 目标 {scored.target}"
+                        f"（偏差 {scored.deviation:+d}）"
+                    ),
+                    "violations": scored.violated_constraints,
+                },
+            ] + [
+                {
+                    "judge": f"character:{r['name']}",
+                    "verdict": "过" if r["passed"] else "不过",
+                    "reason": r["reason"],
+                    "violations": r["violations"],
+                }
+                for r in char_reviews
+            ]
+
+            with metered(cost, "acceptor", self.llm):
+                arbitration = reg.call(
+                    "acceptor",
+                    "arbitrate",
+                    chapter=chapter,
+                    text=text,
+                    brief=brief,
+                    judgments=judge_list,
+                )
             arbitrations.append(arbitration)
 
             if arbitration["decision"] == "pass":
@@ -453,6 +471,7 @@ class Orchestrator:
             tokens=self.llm.tokens_used,
             evidence=evidence,
             out_path=out_path,
+            cost_by_role=dict(cost),
         )
 
 

@@ -38,9 +38,11 @@ def main() -> int:
         return 2
 
     text = path.read_text(encoding="utf-8")
-    reg = bootstrap(
-        ToolRegistry(), llm=OpenAIProvider.from_env(), book_id=args.book
-    )
+    llm = OpenAIProvider.from_env()
+    # 这个脚本通篇都是判官，没有写作 —— 全程低温，跟 orchestrator 里 judge_mode 一个口径。
+    # 实测 0.8 下同一份正文分数在 55~72 之间跳，0.1 下三次都是 64。
+    llm.temperature = 0.1
+    reg = bootstrap(ToolRegistry(), llm=llm, book_id=args.book)
 
     print("=" * 60)
     print(f"审：{path.name}    第 {args.chapter} 章    书 {args.book}")

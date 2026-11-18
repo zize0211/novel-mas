@@ -23,6 +23,34 @@ from typing import Iterator, Protocol, runtime_checkable
 
 
 @contextmanager
+def judge_mode(llm, temperature: float = 0.1) -> Iterator[None]:
+    """把 llm 切到「判官温度」，出块时恢复。
+
+    为什么要有它：写作和判官要的不是同一个温度 ——
+    写正文要 0.8（有起伏，不然每章一个调子）；
+    当尺子要 0.1（量具要稳，抖一下结论就翻了）。
+
+    实测（2026-11-18，同一份 1266 字正文，各打三次）：
+        T=0.1   64 / 64 / 64   极差 0    ← 连三个视角的分都一样
+        T=0.8   60 / 61 / 70   极差 10
+        T=0.95  55 / 60 / 65   极差 10
+    也就是说，之前那次「跑章时 72 分、审计时 55 分」不是判得不一样，
+    是同一把尺子在抖 —— 而阈值 60 正好落在抖动区间里。
+
+    没有 temperature 属性的 provider（假模型、自定义）静默跳过，不报错。
+    """
+    if not hasattr(llm, "temperature"):
+        yield
+        return
+    old = llm.temperature
+    llm.temperature = temperature
+    try:
+        yield
+    finally:
+        llm.temperature = old
+
+
+@contextmanager
 def metered(cost: dict[str, int], label: str, llm) -> Iterator[None]:
     """记一段调用的 token 开销，按角色分开算。
 

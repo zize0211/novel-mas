@@ -114,7 +114,17 @@ def build_prompt(m: dict, chapter: int, brief: str) -> str:
     world_block = "\n".join(f"- {r['body']}" for r in m["rules"]) or "- （无世界观）"
 
     # 前情：跟 writer.get_worldview 的 recap 口径一致（最近 8 条 minor，按章倒序再翻正）
-    minor = [e for e in m["events"] if e["kind"] == "minor" and e["summary"]]
+    #
+    # 但**只取本章之前的**。不然重跑第 1 章时，上一次跑留下的「第 1 章」事件
+    # 会跑进前情里，跟 MAS 当时看到的输入不一致 —— 两组输入必须一样，这比较才成立。
+    minor = [
+        e
+        for e in m["events"]
+        if e["kind"] == "minor"
+        and e["summary"]
+        and e["chapter"] is not None
+        and e["chapter"] < chapter
+    ]
     minor = minor[-8:]
     recap_block = "\n".join(
         f"- 第 {e['chapter']} 章：{e['summary']}" for e in reversed(minor)

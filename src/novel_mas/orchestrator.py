@@ -34,7 +34,7 @@ from pathlib import Path
 
 from .agents import bootstrap
 from .db import base as db
-from .llm import FakeProvider, Provider, metered
+from .llm import FakeProvider, Provider, judge_mode, metered
 from .tools.registry import ToolRegistry
 from .types import Event, EventKind, TrendVerdict, Verdict
 
@@ -241,13 +241,16 @@ class Orchestrator:
                     text = self.llm.complete(base_prompt + feedback)
 
             # 6. 世界意志过闸（真推理，不是关键词）
-            with metered(cost, "world_will", self.llm):
+            #
+            # 判官一律走 judge_mode：尺子用 0.1，写正文用 0.8。
+            # 实测 0.8 下同一份正文在 55~72 之间跳，0.1 下三次都是 64。
+            with metered(cost, "world_will", self.llm), judge_mode(self.llm):
                 judgment = reg.call(
                     "world_will", "check_consistency", claim=text, chapter=chapter
                 )
 
             # 7. 走向打分（模型抽事件 + Python 按口径算分）
-            with metered(cost, "trend", self.llm):
+            with metered(cost, "trend", self.llm), judge_mode(self.llm):
                 scored = reg.call(
                     "trend", "score_direction", book_id=book, text=text, chapter=chapter
                 )
@@ -261,7 +264,7 @@ class Orchestrator:
             for c in chars:
                 if c.importance != "lead":
                     continue
-                with metered(cost, "character", self.llm):
+                with metered(cost, "character", self.llm), judge_mode(self.llm):
                     char_reviews.append(
                         reg.call(
                             "character",
@@ -336,7 +339,7 @@ class Orchestrator:
                 for r in char_reviews
             ]
 
-            with metered(cost, "acceptor", self.llm):
+            with metered(cost, "acceptor", self.llm), judge_mode(self.llm):
                 arbitration = reg.call(
                     "acceptor",
                     "arbitrate",

@@ -256,6 +256,11 @@ PAGE = r"""<!DOCTYPE html>
     </section>
 
     <section>
+      <h2>本书概况 <button class="ghost" style="float:right" onclick="loadBook()">刷新</button></h2>
+      <div id="bookBox" class="muted">点「刷新」看书里有什么。</div>
+    </section>
+
+    <section>
       <h2>历史成绩</h2>
       <div id="history" class="muted">点右上「刷新历史」。</div>
     </section>
@@ -313,7 +318,7 @@ async function act(what, payload) {
     const book = val('bookId') || 'demo';
     const r = await post('/api/' + what, {book_id: book, ...payload});
     toast(r.message || '好了');
-    if (what === 'curve') toast('生成了 ' + r.points + ' 个点');
+    loadBook();
   } catch (e) {
     toast('失败：' + e.message, 5000);
   } finally {
@@ -460,6 +465,26 @@ function renderResult(r) {
   $('result').innerHTML = html;
 }
 
+async function loadBook() {
+  const box = $('bookBox');
+  try {
+    const r = await get('/api/book?book_id=' + encodeURIComponent(val('bookId') || 'demo'));
+    const dash = '<span class="muted">（空）</span>';
+    let html = '<b>世界观</b><br>' + (r.world.length
+      ? r.world.map(w => esc(w.title + '：' + w.body)).join('<br>') : dash);
+    html += '<div style="margin-top:8px"><b>人物</b><br>' + (r.characters.length
+      ? r.characters.map(c => esc(c.name + '（' + c.importance + '｜' + (c.state || '未记') + '）')
+          + (c.profile ? '<br><span class="muted">' + esc(c.profile) + '</span>' : '')).join('<br>')
+      : dash) + '</div>';
+    html += '<div style="margin-top:8px"><b>曲线</b><br>' + (r.curve.length
+      ? r.curve.map(p => '第' + p.chapter + '章 ' + p.target).join(' / ') : dash) + '</div>';
+    box.innerHTML = html;
+    if (r.curve.length) renderCurve({points: r.curve, warnings: []});
+  } catch (e) {
+    box.innerHTML = '<span class="bad">' + esc(e.message) + '</span>';
+  }
+}
+
 async function loadHistory() {
   const box = $('history');
   try {
@@ -481,6 +506,7 @@ async function loadHistory() {
 
 loadHistory();
 loadConfig();
+loadBook();
 </script>
 </body>
 </html>
@@ -521,6 +547,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/config":
             self._config_get()
+            return
+        if parsed.path == "/api/book":
+            qs = parse_qs(parsed.query)
+            self._book(str((qs.get("book_id") or ["demo"])[0]))
             return
         if parsed.path == "/api/history":
             qs = parse_qs(parsed.query)
@@ -719,6 +749,57 @@ class Handler(BaseHTTPRequestHandler):
 
     def _config_get(self) -> None:
         self._json(self._config_payload())
+
+    def _book(self, book: str) -> None:
+        """一本书现在有什么：世界观、人物、曲线。只读，给页面看底细。"""
+        conn = db.connect("world.db")
+        try:
+            world = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT category, title, body FROM world_bible"
+                    " WHERE book_id = ? ORDER BY id",
+                    (book,),
+                )
+            ]
+        finally:
+            conn.close()
+
+        conn = db.connect("char.db")
+        try:
+            characters = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT name, importance, profile, state, as_of_chapter"
+                    " FROM characters WHERE book_id = ? ORDER BY id",
+                    (book,),
+                )
+            ]
+        finally:
+            conn.close()
+
+        conn = db.connect("trend.db")
+        try:
+            curve = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT chapter, target, tolerance FROM curve"
+                    " WHERE book_id = ? ORDER BY chapter",
+                    (book,),
+                )
+            ]
+        finally:
+            conn.close()
+
+        self._json(
+            {
+                "ok": True,
+                "book_id": book,
+                "world": world,
+                "characters": characters,
+                "curve": curve,
+            }
+        )
 
     def _config_post(self, body: dict) -> None:
         updates: dict[str, str] = {}

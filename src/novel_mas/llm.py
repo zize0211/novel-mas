@@ -52,6 +52,51 @@ def judge_mode(llm, temperature: float = 0.1) -> Iterator[None]:
 
 
 @contextmanager
+def author_mode(
+    llm, temperature: float | None = None, top_p: float | None = None
+) -> Iterator[None]:
+    """把 llm 切到「写手设定」，出块时恢复。
+
+    跟 judge_mode 对称，方向相反：判官要稳（0.1 起），写手要活（可调）。
+
+    为什么用上下文管理器而不是直接改属性：判官和写手共用同一个 provider，
+    直接改 `llm.temperature` 会漏到下一次判断里去 —— 那就是「写手旋钮带偏了尺子」，
+    E-007 那套温度校准就白做了。这里只改「调用的那一会儿」，出块立刻还原。
+
+    没这属性的 provider（假模型、自定义实现）静默跳过，不报错。
+    """
+    saved: dict[str, object] = {}
+    if temperature is not None and hasattr(llm, "temperature"):
+        saved["temperature"] = llm.temperature
+        llm.temperature = temperature
+    if top_p is not None and hasattr(llm, "top_p"):
+        saved["top_p"] = llm.top_p
+        llm.top_p = top_p
+    try:
+        yield
+    finally:
+        for name, old in saved.items():
+            setattr(llm, name, old)
+
+
+def env_number(name: str, default: float | None = None) -> float | None:
+    """从 .env / 环境变量读一个数字；没配或不像数字就返回 default。
+
+    .env 优先，跟 from_env() 一个口径 —— 面板改的是 .env，
+    环境变量只是兜底，不能让别处的同名变量把面板设置压住。
+
+    没配时返回 None（不是 0）：0 是合法温度，不能拿 0 当「没设置」。
+    """
+    raw = _env_file_values().get(name) or os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+@contextmanager
 def metered(cost: dict[str, int], label: str, llm) -> Iterator[None]:
     """记一段调用的 token 开销，按角色分开算。
 
@@ -262,6 +307,7 @@ class OpenAIProvider:
     model: str = "deepseek-chat"
     base_url: str = "https://api.deepseek.com/v1"
     temperature: float = 0.8
+    top_p: float | None = None      # None = 不发这个字段，让服务端用自己的默认
     timeout: int = 120
     _tokens: int = field(default=0, repr=False)
 
@@ -317,6 +363,8 @@ class OpenAIProvider:
             "messages": messages,
             "temperature": self.temperature,
         }
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
         req = urllib.request.Request(
             f"{self.base_url.rstrip('/')}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),

@@ -332,11 +332,16 @@ PAGE = r"""<!DOCTYPE html>
         <input id="cfgModel" placeholder="deepseek-chat">
         <label>api_key（留空 = 不动现有的）</label>
         <input id="cfgKey" type="password" placeholder="sk-..." autocomplete="off">
+        <label>写手温度（0–1.5，留空 = 跟随默认 0.8）</label>
+        <input id="cfgWriterTemp" type="number" step="0.1" min="0" max="1.5" placeholder="0.8">
+        <label>写手 top_p（0.1–1.0，留空 = 不发这个字段）</label>
+        <input id="cfgWriterTopP" type="number" step="0.05" min="0.1" max="1" placeholder="留空">
+        <div class="muted" style="margin-top:6px">这两项只作用在<b>写正文</b>那一次调用上；世界 / 走向 / 人物三个判官和仲裁一律 0.1，不受影响。</div>
         <div class="row" style="margin-top:10px">
           <button onclick="saveConfig()">保存</button>
           <button class="ghost" onclick="loadConfig()">重读</button>
         </div>
-        <div class="muted" style="margin-top:8px">key 只从 .env 读，页面不保存也不回显；改完写回 .env 并留一份备份。</div>
+        <div class="muted" style="margin-top:8px">key 只从 .env 读，页面不保存也不回显；改完写回 .env（不额外留副本）。</div>
       </div>
     </section>
 
@@ -486,6 +491,8 @@ async function loadConfig() {
     const r = await get('/api/config');
     $('cfgBase').value = r.base_url;
     $('cfgModel').value = r.model;
+    $('cfgWriterTemp').value = (r.writer_temperature === null) ? '' : r.writer_temperature;
+    $('cfgWriterTopP').value = (r.writer_top_p === null) ? '' : r.writer_top_p;
     // 收起时只看这一行：用的哪个模型、连的哪个端点、key 有没有
     sum.innerHTML = '<b>' + esc(r.model) + '</b> @ ' + esc(r.base_url)
       + (r.has_key ? ' · key ' + esc(r.key_tail) : ' · <b class="bad">key 没配</b>');
@@ -516,6 +523,8 @@ async function saveConfig() {
       base_url: val('cfgBase'),
       model: val('cfgModel'),
       api_key: typedKey,
+      writer_temperature: val('cfgWriterTemp'),
+      writer_top_p: val('cfgWriterTopP'),
     });
     if (typedKey) $('cfgKey').value = '';   // 别在输入框里留着明文
     toast(r.message || '已保存', 7000);
@@ -1155,6 +1164,17 @@ class Handler(BaseHTTPRequestHandler):
             or os.environ.get("DEEPSEEK_API_KEY")
             or ""
         ).strip()
+
+        def _num(name: str) -> float | None:
+            """读一个数字配置；没配就返回 None（0 是合法值，不能拿 0 当「没设置」）。"""
+            raw = env_file.get(name) or os.environ.get(name)
+            if not raw:
+                return None
+            try:
+                return float(str(raw).strip())
+            except ValueError:
+                return None
+
         return {
             "ok": True,
             "base_url": base_url,
@@ -1163,6 +1183,8 @@ class Handler(BaseHTTPRequestHandler):
             "key_tail": ("…" + key[-4:]) if len(key) >= 8 else "",
             "env_file": str(ENV_PATH),
             "writable": True,
+            "writer_temperature": _num("NOVEL_WRITER_TEMPERATURE"),
+            "writer_top_p": _num("NOVEL_WRITER_TOP_P"),
         }
 
     def _config_get(self) -> None:
@@ -1246,8 +1268,25 @@ class Handler(BaseHTTPRequestHandler):
                 else "DEEPSEEK_API_KEY"
             )
             updates[key_name] = api_key
+        # 写手旋钮：只存不验范围是不够的 —— 温度 5.0 也能存进去，然后每章都炸。
+        for field, env_name, lo, hi, label in (
+            ("writer_temperature", "NOVEL_WRITER_TEMPERATURE", 0.0, 1.5, "写手温度"),
+            ("writer_top_p", "NOVEL_WRITER_TOP_P", 0.1, 1.0, "写手 top_p"),
+        ):
+            raw = str(body.get(field) or "").strip()
+            if not raw:
+                continue            # 留空 = 不动这一项
+            try:
+                num = float(raw)
+            except ValueError:
+                self._fail(f"{label} 要填数字（现在填的是「{raw}」）")
+                return
+            if not lo <= num <= hi:
+                self._fail(f"{label} 要在 {lo}–{hi} 之间（现在是 {num}）")
+                return
+            updates[env_name] = f"{num:g}"
         if not updates:
-            self._fail("没有要改的项（base_url / model / api_key）")
+            self._fail("没有要改的项（base_url / model / api_key / 写手温度 / top_p）")
             return
         path, created = _write_env(updates)
         # 写文件不够：from_env() 读的是 os.environ，得同步

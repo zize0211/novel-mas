@@ -349,6 +349,60 @@ def _env_render() -> None:
 
 check("生成 .env：带头注释、保留未知键、同名覆盖", _env_render)
 
+print("=== 10. 写手旋钮（author_mode / top_p）===")
+
+
+def _author_mode() -> None:
+    import inspect
+    import os as _os
+
+    from novel_mas.llm import (
+        FakeProvider,
+        OpenAIProvider,
+        author_mode,
+        env_number,
+        judge_mode,
+    )
+
+    real = OpenAIProvider(api_key="sk-test-1234", temperature=0.8, top_p=None)
+    assert real.top_p is None, real.top_p
+
+    with author_mode(real, 1.2, 0.9):
+        assert real.temperature == 1.2 and real.top_p == 0.9
+        # 关键一条：判官在写手设定里仍然要落到 0.1 —— 尺子不能被写手的旋钮带偏
+        with judge_mode(real):
+            assert real.temperature == 0.1, real.temperature
+        assert real.temperature == 1.2, real.temperature   # 出判官恢复写手设定
+    # 出 author_mode 全部还原
+    assert real.temperature == 0.8 and real.top_p is None
+
+    # 只给温度、不给 top_p：top_p 保持原样
+    with author_mode(real, 0.5):
+        assert real.temperature == 0.5 and real.top_p is None
+
+    # 假模型没有这些属性：静默跳过，不炸
+    with author_mode(FakeProvider(), 0.9, 0.5):
+        pass
+
+    # 数字配置：没配返回 None（0 是合法温度，不能拿 0 当「没设置」）
+    name = "NOVEL_TEST_NUM_X"
+    _os.environ.pop(name, None)
+    assert env_number(name) is None
+    _os.environ[name] = "0"
+    assert env_number(name) == 0.0
+    _os.environ[name] = "abc"
+    assert env_number(name) is None
+    _os.environ.pop(name, None)
+
+    # 编排者要能接这两个参数（不然面板存了也没人用）
+    from novel_mas.orchestrator import Orchestrator
+
+    params = inspect.signature(Orchestrator.__init__).parameters
+    assert "author_temperature" in params and "author_top_p" in params, params
+
+
+check("写手旋钮：只影响写正文、出块还原、不带动判官", _author_mode)
+
 print()
 print(f"通过 {passed} 项，失败 {len(failed)} 项")
 if failed:

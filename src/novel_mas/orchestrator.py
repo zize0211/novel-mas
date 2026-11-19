@@ -34,7 +34,7 @@ from pathlib import Path
 
 from .agents import bootstrap
 from .db import base as db
-from .llm import FakeProvider, Provider, judge_mode, metered
+from .llm import FakeProvider, Provider, author_mode, env_number, judge_mode, metered
 from .tools.registry import ToolRegistry
 from .types import Event, EventKind, TrendVerdict, Verdict
 
@@ -97,11 +97,29 @@ class Orchestrator:
     """最小闭环的调度器。没有 LLM 也能跑。"""
 
     def __init__(
-        self, book_id: str = "demo", llm: Provider | None = None, style: str = "日常"
+        self,
+        book_id: str = "demo",
+        llm: Provider | None = None,
+        style: str = "日常",
+        author_temperature: float | None = None,
+        author_top_p: float | None = None,
     ) -> None:
         self.book_id = book_id
         self.llm: Provider = llm or FakeProvider()
         self.style = style
+        # 写手旋钮：只作用在「写正文」那一次调用上（author_mode），判官不受影响。
+        # 没显式传就从 .env 读 NOVEL_WRITER_TEMPERATURE / NOVEL_WRITER_TOP_P；
+        # 都没配就是 None —— 不改 provider 的设定，行为跟以前一模一样。
+        self.author_temperature = (
+            author_temperature
+            if author_temperature is not None
+            else env_number("NOVEL_WRITER_TEMPERATURE")
+        )
+        self.author_top_p = (
+            author_top_p
+            if author_top_p is not None
+            else env_number("NOVEL_WRITER_TOP_P")
+        )
         db.migrate()
         # 每个编排者用**自己的** registry：bootstrap 默认的那个是全局单例，
         # 先用假模型建过一轮之后，再换真模型也会拿回旧的（闭包里绑着假模型）。
@@ -259,7 +277,9 @@ class Orchestrator:
             if mock_text is not None:
                 text = mock_text
             else:
-                with metered(cost, "writer", self.llm):
+                with metered(cost, "writer", self.llm), author_mode(
+                    self.llm, self.author_temperature, self.author_top_p
+                ):
                     text = self.llm.complete(base_prompt + feedback)
 
             # 6. 世界意志过闸（真推理，不是关键词）

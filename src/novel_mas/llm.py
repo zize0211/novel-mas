@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Protocol, runtime_checkable
 
+from . import agentlog
+
 
 @contextmanager
 def judge_mode(llm, temperature: float = 0.1) -> Iterator[None]:
@@ -97,11 +99,19 @@ def env_number(name: str, default: float | None = None) -> float | None:
 
 
 @contextmanager
-def metered(cost: dict[str, int], label: str, llm) -> Iterator[None]:
+def metered(
+    cost: dict[str, int],
+    label: str,
+    llm,
+    action: str | None = None,
+    *,
+    book_id: str | None = None,
+    chapter: int | None = None,
+) -> Iterator[None]:
     """记一段调用的 token 开销，按角色分开算。
 
     用法：
-        with metered(cost, "world_will", llm):
+        with metered(cost, "world_will", llm, "过闸检查"):
             verdict = reg.call("world_will", "check_consistency", ...)
 
     为什么需要它：tokens_used 只有一个总数，说不清是哪个角色花的。
@@ -109,13 +119,30 @@ def metered(cost: dict[str, int], label: str, llm) -> Iterator[None]:
     只报一个 3495，等于什么都没说。
 
     finally 里记：即使中途抛异常，花掉的钱也算数。
+    顺手也往角色日志里落一条（`agentlog`）：谁、什么动作、花了多少、用多久。
     """
     before = getattr(llm, "tokens_used", 0)
+    started = time.perf_counter()
+    ok = True
     try:
         yield
+    except BaseException:
+        ok = False
+        raise
     finally:
         after = getattr(llm, "tokens_used", 0)
-        cost[label] = cost.get(label, 0) + (after - before)
+        spent = after - before
+        cost[label] = cost.get(label, 0) + spent
+        agentlog.log_event(
+            label,
+            action or "模型调用",
+            kind="llm",
+            tokens=spent,
+            ok=ok,
+            ms=int((time.perf_counter() - started) * 1000),
+            book_id=book_id,
+            chapter=chapter,
+        )
 
 
 @runtime_checkable

@@ -1,4 +1,4 @@
--- ============ world.db（世界意志独占） ============
+﻿-- ============ world.db（世界意志独占） ============
 
 CREATE TABLE IF NOT EXISTS world_bible (
   id          INTEGER PRIMARY KEY,
@@ -158,7 +158,38 @@ CREATE TABLE IF NOT EXISTS chapter_scores (
   deviation  INTEGER,
   verdict    TEXT NOT NULL,               -- on_track|drifted|violated
   evidence   TEXT,                        -- JSON
+  tokens     INTEGER,                     -- 本章这一次运行的 token 合计（旧数据为空）
   created_at TEXT NOT NULL,
   -- 一章只留一条成绩。重跑同一章要覆盖，不是并排堆两条。
+  UNIQUE(book_id, chapter)
+);
+
+-- 卷纲：**人**给的总纲（六卷就是六行，原文照收不改写）。
+-- 走向拿它切「本章指令」，写手看不到这一层 —— 写手吃的是加工后的指令。
+CREATE TABLE IF NOT EXISTS arc (
+  id           INTEGER PRIMARY KEY,
+  book_id      TEXT NOT NULL,
+  volume       INTEGER NOT NULL,
+  title        TEXT,
+  plan         TEXT NOT NULL,             -- 原文，不改写
+  from_chapter INTEGER,                   -- 这一卷从第几章开始（None = 不按章段切）
+  to_chapter   INTEGER,
+  created_at   TEXT NOT NULL,
+  UNIQUE(book_id, volume)
+);
+
+-- 本章指令：走向加工出来的「你该写什么 + 谁上场 / 谁不许出现」。
+-- 为什么要落库：将来要能回答「当时为什么这么写」。指令只在内存里，就没法复现。
+CREATE TABLE IF NOT EXISTS chapter_plan (
+  id         INTEGER PRIMARY KEY,
+  book_id    TEXT NOT NULL,
+  chapter    INTEGER NOT NULL,
+  volume     INTEGER,
+  directive  TEXT NOT NULL,               -- 人看得懂的一段话
+  cast_names TEXT,                        -- JSON 数组：本章出场的人（列名不能叫 cast，那是 SQL 关键字）
+  forbidden  TEXT,                        -- JSON 数组：本章不许出现的人
+  target     INTEGER,                     -- 本章情绪目标分（来自曲线）
+  by_human   INTEGER NOT NULL DEFAULT 0,  -- 1 = 人改过，不再算走向原话
+  created_at TEXT NOT NULL,
   UNIQUE(book_id, chapter)
 );

@@ -91,6 +91,15 @@ def _upgrade(conn: sqlite3.Connection, name: str) -> None:
     CREATE TABLE IF NOT EXISTS 只对**不存在**的表生效 —— 已经建过的表
     不会因为改了 all.sql 就长出新的列。所以升级得单独写。
     """
+    if name == "trend.db":
+        # 2026-11-19：E-009 要记每章 token，加这一列。旧行的 token 留空（NULL），
+        # 不拿别的数去填 —— 那批历史数据本来就没记。
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(chapter_scores)")}
+        if "tokens" not in cols:
+            conn.execute("ALTER TABLE chapter_scores ADD COLUMN tokens INTEGER")
+            conn.commit()
+        return
+
     if name != "world.db":
         return
 

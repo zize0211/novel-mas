@@ -70,7 +70,8 @@ check("白名单无遗漏", lambda: (_ for _ in ()).throw(AssertionError(reg.che
 def _counts() -> None:
     assert len(reg.names_for("world_will")) == 8
     assert len(reg.names_for("character")) == 5
-    assert len(reg.names_for("trend")) == 3
+    # 3 个只判情绪 + 5 个管内容（卷纲 / 指令 / 合规）—— 见 2026-11-19 的 Q8
+    assert len(reg.names_for("trend")) == 8, sorted(reg.names_for("trend"))
     assert len(reg.names_for("writer")) == 5
     assert len(reg.names_for("acceptor")) == 2
 
@@ -427,6 +428,54 @@ def _curve_guard() -> None:
 
 
 check("曲线坡度：合法不报、断崖报得准、越界报 range", _curve_guard)
+
+print("=== 12. 角色日志：五个角色都留痕 ===")
+
+
+def _agentlog() -> None:
+    import tempfile
+
+    from novel_mas import agentlog
+    from novel_mas.llm import FakeProvider, metered
+
+    # 写到临时目录，别把自检的流水混进真日志
+    old = db.DATA_DIR
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            db.DATA_DIR = Path(td)
+            fake = FakeProvider()
+            cost: dict[str, int] = {}
+
+            with agentlog.bind(book_id="logcheck", chapter=7):
+                for role in ("writer", "world_will", "character", "trend", "acceptor"):
+                    with metered(cost, role, fake, f"{role} 的活"):
+                        fake.complete("随手的提示词")
+
+            rows = agentlog.read_records()
+            assert len(rows) == 5, rows
+            assert {r["role"] for r in rows} == set(agentlog.ROLES), rows
+            # 上下文要自动带上：书号、章号（不靠调用点一个个传）
+            assert all(r["book_id"] == "logcheck" for r in rows), rows
+            assert all(r["chapter"] == 7 for r in rows), rows
+            assert set(cost) == set(agentlog.ROLES), cost
+
+            # 汇总按角色分开算，token 不能串台
+            total = agentlog.summarize(rows, book_id="logcheck", chapter=7)
+            assert set(total) == set(agentlog.ROLES), total
+            assert sum(v["tokens"] for v in total.values()) == sum(cost.values())
+
+            # 别的书不该混进来
+            assert agentlog.summarize(rows, book_id="别人家的书") == {}
+
+            # 坏行不能把整份日志读崩
+            with agentlog.log_path().open("a", encoding="utf-8") as fh:
+                fh.write("{这不是合法 JSON\n")
+            assert len(agentlog.read_records()) == 5
+        finally:
+            db.DATA_DIR = old
+
+
+check("角色日志：五角色各自留痕、上下文自动带书与章、坏行不崩", _agentlog)
 
 print()
 print(f"通过 {passed} 项，失败 {len(failed)} 项")

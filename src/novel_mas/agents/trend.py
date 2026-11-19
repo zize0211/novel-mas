@@ -1,4 +1,4 @@
-"""世界走向 agent —— 管「这故事该不该走到这儿」。
+﻿"""世界走向 agent —— 管「这故事该不该走到这儿」。
 
 分值方向：高 = 感人/温馨/日常/阳光（happy end）；低 = 分离/死亡/堕落（bad end）。
 注意这**不是质量分**，是情绪方向分。
@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..db import base as db
 from ..llm import Provider, parse_json_block
@@ -27,6 +27,10 @@ from ..types import (
     TrendVerdict,
 )
 from . import BaseAgent
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class WorldTrend(BaseAgent):
@@ -233,6 +237,314 @@ class WorldTrend(BaseAgent):
         """旧口径：只给人类读的警告句子。结构化版本见 find_slope_problems。"""
         return [w["message"] for w in WorldTrend.find_slope_problems(points, max_slope)]
 
+    # ---------- 工具 4：卷纲（人给的总纲） ----------
+    #
+    # 分工定死在这里：**卷纲是人的**，走向只读不改写；写手永远看不到卷纲原文，
+    # 它拿到的是走向加工后的「本章指令」（工具 5）。
+
+    def set_arc(
+        self,
+        book_id: str,
+        volume: int,
+        plan: str,
+        title: str = "",
+        from_chapter: int | None = None,
+        to_chapter: int | None = None,
+    ) -> dict:
+        plan = (plan or "").strip()
+        if not plan:
+            raise ValueError("卷纲不能空；这一卷还没想好就先别存")
+        conn = db.connect("trend.db")
+        try:
+            conn.execute(
+                "INSERT INTO arc(book_id,volume,title,plan,from_chapter,to_chapter,created_at)"
+                " VALUES(?,?,?,?,?,?,?)"
+                " ON CONFLICT(book_id,volume) DO UPDATE SET"
+                "   title=excluded.title, plan=excluded.plan,"
+                "   from_chapter=excluded.from_chapter,"
+                "   to_chapter=excluded.to_chapter, created_at=excluded.created_at",
+                (
+                    book_id,
+                    int(volume),
+                    (title or f"第{volume}卷").strip(),
+                    plan,
+                    None if from_chapter is None else int(from_chapter),
+                    None if to_chapter is None else int(to_chapter),
+                    _now(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {
+            "ok": True,
+            "volume": int(volume),
+            "message": f"第 {volume} 卷卷纲已存（{len(plan)} 字）",
+        }
+
+    def get_arc(self, book_id: str, volume: int | None = None) -> dict:
+        """取某一卷；不给卷号就取章段覆盖这个书里所有卷。"""
+        conn = db.connect("trend.db")
+        try:
+            if volume is None:
+                rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT volume,title,plan,from_chapter,to_chapter"
+                        " FROM arc WHERE book_id = ? ORDER BY volume",
+                        (book_id,),
+                    )
+                ]
+                return {"ok": True, "arcs": rows}
+            row = conn.execute(
+                "SELECT volume,title,plan,from_chapter,to_chapter"
+                " FROM arc WHERE book_id = ? AND volume = ?",
+                (book_id, int(volume)),
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"第 {volume} 卷没有卷纲；先存一份")
+            return {"ok": True, **dict(row)}
+        finally:
+            conn.close()
+
+    def volume_for_chapter(self, book_id: str, chapter: int) -> int | None:
+        """章 → 卷。按 from_chapter/to_chapter 算；没设章段就取卷号最大的一卷。"""
+        conn = db.connect("trend.db")
+        try:
+            rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT volume,from_chapter,to_chapter FROM arc WHERE book_id = ?",
+                    (book_id,),
+                )
+            ]
+        finally:
+            conn.close()
+        for r in rows:
+            lo, hi = r["from_chapter"], r["to_chapter"]
+            if lo is not None and hi is not None and lo <= chapter <= hi:
+                return int(r["volume"])
+        ranged = [r for r in rows if r["from_chapter"] is not None]
+        if ranged:
+            previous = [r for r in ranged if r["from_chapter"] <= chapter]
+            if previous:
+                return int(max(previous, key=lambda r: r["from_chapter"])["volume"])
+            return int(min(ranged, key=lambda r: r["from_chapter"])["volume"])
+        return int(max(rows, key=lambda r: r["volume"])["volume"]) if rows else None
+
+    # ---------- 工具 5：本章指令（走向从「判官」变「导演」） ----------
+
+    def plan_chapter(
+        self,
+        book_id: str,
+        chapter: int,
+        cast_hint: str = "",
+        previous: str = "",
+    ) -> dict:
+        """把卷纲切成「本章该写什么 + 谁上场 + 谁不许出现」。
+
+        `cast_hint` 是人物表（名字/分量/档案/当前状态），`previous` 是前情。
+        两个都由编排层给 —— 走向不自己去读别人的库（隔离还在）。
+        """
+        if self.llm is None:
+            raise RuntimeError("出指令要模型：先给 WorldTrend(llm=...)")
+
+        volume = self.volume_for_chapter(book_id, chapter)
+        if volume is None:
+            raise LookupError("这本书还没有任何卷纲；先在「卷纲」里存一卷")
+        arc = self.get_arc(book_id, volume)
+
+        curve = self._curve_row(book_id, chapter)
+        intent = self._intent_row(book_id)
+        target = curve["target"] if curve else 50
+        tol = curve["tolerance"] if curve else 15
+
+        raw = self.llm.complete(
+            f"你在给一部长篇切「第 {chapter} 章」的写作指令。你**不是**写手，"
+            "你只决定这一章该发生什么、谁能上场。\n\n"
+            f"【本卷卷纲：第 {volume} 卷《{arc.get('title') or ''}》】\n{arc['plan']}\n\n"
+            f"【结局意图】{intent}\n"
+            f"【本章情绪目标】{target} 分（容差 ±{tol}；高=温暖，低=黑暗）\n"
+            f"【人物表】\n{cast_hint or '- （空）'}\n\n"
+            f"【前情】\n{previous or '- 这是第一章，前面没有故事'}\n\n"
+            "规矩：\n"
+            "1. 只安排**这一章**：3–5 条，具体到「谁做了什么、结果如何」。"
+            "不要写后面的伏笔总结，不要替下一章安排。\n"
+            "2. cast 只能从上面的人物表里选，写**本章真正出场**的人。\n"
+            "3. forbidden 写**本章不许出现**的人，尤其其他卷的主角 —— 这本书是"
+            "一主一卷，别的卷的人这一章不许露脸，也不许被评价。\n"
+            "4. 不许凭空安排人物表以外的新角色登场。\n"
+            "只输出 JSON：\n"
+            '{"volume": ' + str(volume) + ', "directive": "这一章该发生什么", '
+            '"cast": ["名字"], "forbidden": ["名字"], "target": ' + str(target) + '}',
+            system="你只输出 JSON，不聊天，不解释。",
+        )
+        data = parse_json_block(raw)
+
+        directive = str(data.get("directive") or "").strip()
+        if not directive:
+            raise ValueError(f"走向没给出指令正文：{raw[:200]}")
+        cast = [str(x).strip() for x in (data.get("cast") or []) if str(x).strip()]
+        forbidden = [
+            str(x).strip() for x in (data.get("forbidden") or []) if str(x).strip()
+        ]
+        # 自己列的人不许和自己安排的出场表打架
+        forbidden = [n for n in forbidden if n not in cast]
+
+        conn = db.connect("trend.db")
+        try:
+            conn.execute(
+                "INSERT INTO chapter_plan"
+                "(book_id,chapter,volume,directive,cast_names,forbidden,target,by_human,created_at)"
+                " VALUES(?,?,?,?,?,?,?,0,?)"
+                " ON CONFLICT(book_id,chapter) DO UPDATE SET"
+                "   volume=excluded.volume, directive=excluded.directive,"
+                "   cast_names=excluded.cast_names, forbidden=excluded.forbidden,"
+                "   target=excluded.target, by_human=0, created_at=excluded.created_at",
+                (
+                    book_id,
+                    int(chapter),
+                    volume,
+                    directive,
+                    json.dumps(cast, ensure_ascii=False),
+                    json.dumps(forbidden, ensure_ascii=False),
+                    int(data.get("target") or target),
+                    _now(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return {
+            "ok": True,
+            "book_id": book_id,
+            "chapter": int(chapter),
+            "volume": volume,
+            "directive": directive,
+            "cast": cast,
+            "forbidden": forbidden,
+            "target": int(data.get("target") or target),
+        }
+
+    def save_plan_edit(
+        self, book_id: str, chapter: int, directive: str, cast: list[str] | None = None
+    ) -> dict:
+        """人改过指令 → 覆盖，并打上 by_human=1（不再是走向原话）。"""
+        directive = (directive or "").strip()
+        if not directive:
+            raise ValueError("指令不能改成空")
+        conn = db.connect("trend.db")
+        try:
+            row = conn.execute(
+                "SELECT volume,cast_names,forbidden,target FROM chapter_plan"
+                " WHERE book_id = ? AND chapter = ?",
+                (book_id, int(chapter)),
+            ).fetchone()
+            if row is None:
+                raise LookupError("这一章还没有指令，先让走向出一版")
+            conn.execute(
+                "UPDATE chapter_plan SET directive = ?, cast_names = ?, by_human = 1"
+                " WHERE book_id = ? AND chapter = ?",
+                (
+                    directive,
+                    json.dumps(
+                        cast if cast is not None else json.loads(row["cast_names"] or "[]"),
+                        ensure_ascii=False,
+                    ),
+                    book_id,
+                    int(chapter),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "message": "指令已按你的改法存下（记着这是人改的）"}
+
+    def check_plan_compliance(
+        self, book_id: str, chapter: int, text: str
+    ) -> dict:
+        """事后核对：有没有按指令走到、不该出场的人露没露脸。
+
+        判的是**可核对的清单**，不是文笔，也不是分数 —— 所以走向兼这一职
+        不会像「自己出题自己打分」那样失去独立性：该发生的发生了吗、
+        名单外的人出现了吗，这两条谁来判都一样。
+        """
+        conn = db.connect("trend.db")
+        try:
+            row = conn.execute(
+                "SELECT directive,cast_names,forbidden FROM chapter_plan"
+                " WHERE book_id = ? AND chapter = ?",
+                (book_id, int(chapter)),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return {"ok": True, "skipped": "这一章没有指令，跳过合规核对"}
+
+        cast = json.loads(row["cast_names"] or "[]")
+        forbidden = json.loads(row["forbidden"] or "[]")
+        if self.llm is None:
+            raise RuntimeError("核对合规要模型")
+
+        raw = self.llm.complete(
+            "拿一份正文和一张本章指令，只核对三件事，别评价文笔。\n\n"
+            f"【本章指令】\n{row['directive']}\n"
+            f"【本该出场】{', '.join(cast) or '（没限定）'}\n"
+            f"【不许出现】{', '.join(forbidden) or '（没限定）'}\n\n"
+            f"【正文】\n{text[:6000]}\n\n"
+            "只输出 JSON：\n"
+            '{"missing": ["指令里要求发生、但正文没做到的事"], '
+            '"forbidden_seen": ["不许出现、却在正文里出场或说话的人"], '
+            '"new_faces": ["人物表外凭空出现的新角色"]}\n'
+            "判断要严：名字出现且有行动/台词才算出场，被提到但未上场不算。"
+            "没有就给空数组，不要为了显得认真而硬找。",
+            system="你只输出 JSON，不聊天。",
+        )
+        data = parse_json_block(raw)
+
+        missing = [str(x) for x in (data.get("missing") or [])]
+        forbidden_seen = [str(x) for x in (data.get("forbidden_seen") or [])]
+        new_faces = [str(x) for x in (data.get("new_faces") or [])]
+        return {
+            "ok": not forbidden_seen and not new_faces,
+            "missing": missing,
+            "forbidden_seen": forbidden_seen,
+            "new_faces": new_faces,
+        }
+
+    # ---- 读曲线 / 结局意图（给上面两个工具用，不算对外工具） ----
+
+    def _curve_row(self, book_id: str, chapter: int) -> dict | None:
+        conn = db.connect("trend.db")
+        try:
+            row = conn.execute(
+                "SELECT target,tolerance FROM curve WHERE book_id = ? AND chapter = ?",
+                (book_id, int(chapter)),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def _intent_row(self, book_id: str) -> str:
+        conn = db.connect("trend.db")
+        try:
+            row = conn.execute(
+                "SELECT ending_type,target_score,hard_constraints,soft_preferences"
+                " FROM ending_intent WHERE book_id = ?",
+                (book_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return "（没设结局意图）"
+        hard = json.loads(row["hard_constraints"] or "[]")
+        soft = json.loads(row["soft_preferences"] or "[]")
+        return (
+            f"结局 {row['ending_type']}，终局目标分 {row['target_score']}；"
+            f"硬约束 {hard or '无'}；偏好 {soft or '无'}"
+        )
+
     # ---------- 工具 3：剧情走向打分 ----------
 
     # 事件类型 → 方向权重。写在这里，因为这是「口径」不是「内容」：
@@ -435,3 +747,9 @@ def bind(registry, llm=None, book_id: str = "demo") -> None:
     registry.register("set_ending_intent", agent.set_ending_intent)
     registry.register("set_curve", agent.set_curve)
     registry.register("score_direction", agent.score_direction)
+    # 2026-11-19：走向从「只判情绪」扩到「管内容」
+    registry.register("set_arc", agent.set_arc)
+    registry.register("get_arc", agent.get_arc)
+    registry.register("plan_chapter", agent.plan_chapter)
+    registry.register("save_plan_edit", agent.save_plan_edit)
+    registry.register("check_plan_compliance", agent.check_plan_compliance)

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import traceback
@@ -284,14 +285,27 @@ PAGE = r"""<!DOCTYPE html>
         <button class="ghost" onclick="createCurve(true)">按手填写入</button>
       </div>
       <div id="curveChart" class="muted" style="margin-top:12px">还没有曲线。</div>
+
+      <label style="margin-top:14px">卷纲（<b>人</b>给的总纲，原文照收；走向拿它切每章指令）</label>
+      <div class="row">
+        <div><input id="arcVolume" value="1" placeholder="第几卷"></div>
+        <div style="flex:2"><input id="arcTitle" placeholder="卷名（可空）"></div>
+        <div><input id="arcFrom" placeholder="从第几章"></div>
+        <div><input id="arcTo" placeholder="到第几章"></div>
+        <button class="ghost" onclick="saveArc()">存卷纲</button>
+      </div>
+      <textarea id="arcPlan" style="min-height:80px" placeholder="这一卷要发生什么。六卷就存六次。写手永远看不到这一层。"></textarea>
     </section>
 
     <section>
       <h2>④ 写这一章</h2>
       <div class="row">
         <div><label>第几章</label><input id="chapter" value="1"></div>
-        <div style="flex:2"><label>大纲</label><input id="brief" value="李三在巷口捡到一枚铜钱，抬头看见钟楼上有个人影。"></div>
+        <div style="flex:2"><label><b>本章指令</b>（走向出，你能改）</label>
+          <input id="brief" placeholder="点右边「让走向出指令」"></div>
+        <div><label>&nbsp;</label><button class="ghost" onclick="makePlan()">让走向出指令</button></div>
       </div>
+      <div class="muted" id="planInfo" style="margin-top:6px">还没有本章指令：先存卷纲 → 点「让走向出指令」→ 看一眼 → 再点「写」。</div>
       <label style="margin-top:10px">文风</label>
       <div class="row">
         <select id="style">
@@ -305,6 +319,14 @@ PAGE = r"""<!DOCTYPE html>
       <label style="display:flex;align-items:center;gap:8px;margin-top:10px">
         <input type="checkbox" id="realModel"> 用真模型（要花钱，约 3000 token）
       </label>
+      <label style="margin-top:12px">写手温度（0–1.5，留空 = 跟随默认 0.8）</label>
+      <input id="cfgWriterTemp" type="number" step="0.1" min="0" max="1.5" placeholder="0.8">
+      <label>写手 top_p（0.1–1.0，留空 = 不发这个字段）</label>
+      <input id="cfgWriterTopP" type="number" step="0.05" min="0.1" max="1" placeholder="留空">
+      <div class="row" style="margin-top:8px;align-items:center">
+        <button class="ghost" onclick="saveWriterKnobs(event)">存这两项</button>
+        <span class="muted" style="font-size:12px">只作用在<b>写正文</b>那一次调用；三个判官和仲裁仍 0.1，不受影响。</span>
+      </div>
       <button onclick="writeChapter()">写</button>
     </section>
 
@@ -332,11 +354,7 @@ PAGE = r"""<!DOCTYPE html>
         <input id="cfgModel" placeholder="deepseek-chat">
         <label>api_key（留空 = 不动现有的）</label>
         <input id="cfgKey" type="password" placeholder="sk-..." autocomplete="off">
-        <label>写手温度（0–1.5，留空 = 跟随默认 0.8）</label>
-        <input id="cfgWriterTemp" type="number" step="0.1" min="0" max="1.5" placeholder="0.8">
-        <label>写手 top_p（0.1–1.0，留空 = 不发这个字段）</label>
-        <input id="cfgWriterTopP" type="number" step="0.05" min="0.1" max="1" placeholder="留空">
-        <div class="muted" style="margin-top:6px">这两项只作用在<b>写正文</b>那一次调用上；世界 / 走向 / 人物三个判官和仲裁一律 0.1，不受影响。</div>
+        <div class="muted" style="margin-top:6px">写手温度 / top_p 在左边「<b>④ 写这一章</b>」那块——它们是写正文时用的旋钮，跟着写走。</div>
         <div class="row" style="margin-top:10px">
           <button onclick="saveConfig()">保存</button>
           <button class="ghost" onclick="loadConfig()">重读</button>
@@ -648,14 +666,75 @@ async function saveConfig() {
       base_url: val('cfgBase'),
       model: val('cfgModel'),
       api_key: typedKey,
-      writer_temperature: val('cfgWriterTemp'),
-      writer_top_p: val('cfgWriterTopP'),
     });
     if (typedKey) $('cfgKey').value = '';   // 别在输入框里留着明文
     toast(r.message || '已保存', 7000);
     loadConfig();
   } catch (e) {
     toast('失败：' + e.message, 7000);
+  } finally {
+    busy(btn, false);
+  }
+}
+
+// 写手旋钮自己存：它们住在「④ 写这一章」里，不该逼人跑回配置面板点保存
+async function saveWriterKnobs(ev) {
+  const btn = ev.currentTarget;
+  const t = val('cfgWriterTemp');
+  const p = val('cfgWriterTopP');
+  if (!t && !p) { toast('两项都空着 = 不改（留空就是不动）', 6000); return; }
+  busy(btn, true, '存中…');
+  try {
+    const r = await post('/api/config', {
+      writer_temperature: t,
+      writer_top_p: p,
+    });
+    toast((r.message || '已保存') + '（温度 ' + (r.writer_temperature ?? '默认') +
+          ' / top_p ' + (r.writer_top_p ?? '不发') + '）', 8000);
+    loadConfig();
+  } catch (e) {
+    toast('失败：' + e.message, 8000);
+  } finally {
+    busy(btn, false);
+  }
+}
+
+async function saveArc() {
+  const plan = val('arcPlan');
+  if (!plan) { toast('卷纲不能空', 4000); return; }
+  try {
+    const r = await post('/api/arc', {
+      book_id: val('bookId') || 'demo',
+      volume: parseInt(val('arcVolume') || '1', 10),
+      title: val('arcTitle'),
+      from_chapter: val('arcFrom'),
+      to_chapter: val('arcTo'),
+      plan: plan,
+    });
+    toast(r.message || '卷纲已存', 5000);
+  } catch (e) {
+    toast('失败：' + e.message, 8000);
+  }
+}
+
+// 让走向把卷纲切成这一章的指令。写手永远看不到卷纲原文，只看这个结果。
+async function makePlan() {
+  const btn = event.currentTarget;
+  busy(btn, true, '走向在想…');
+  try {
+    const r = await post('/api/plan', {
+      book_id: val('bookId') || 'demo',
+      chapter: parseInt(val('chapter') || '1', 10),
+      real_model: $('realModel').checked,
+      style: val('styleCustom') || val('style'),
+    });
+    $('brief').value = r.directive;
+    $('planInfo').innerHTML = '第 ' + r.chapter + ' 章 · 第 ' + r.volume + ' 卷 ｜ 出场：'
+      + (r.cast.join('、') || '未限定') + ' ｜ 不许出现：'
+      + (r.forbidden.join('、') || '未限定') + ' ｜ 目标分 ' + r.target;
+    toast('指令出来了，看一眼再点「写」', 6000);
+  } catch (e) {
+    toast('失败：' + e.message, 9000);
   } finally {
     busy(btn, false);
   }
@@ -669,7 +748,7 @@ async function writeChapter() {
     const r = await post('/api/write', {
       book_id: val('bookId') || 'demo',
       chapter: parseInt(val('chapter') || '1', 10),
-      brief: val('brief'),
+      directive: val('brief'),
       real_model: $('realModel').checked,
       style: val('styleCustom') || val('style'),
     });
@@ -837,13 +916,21 @@ async function loadHistory() {
   try {
     const r = await get('/api/history?book_id=' + encodeURIComponent(val('bookId') || 'demo'));
     if (!r.rows.length) { box.innerHTML = '<span class="muted">还没有历史。</span>'; return; }
-    let html = '<table><tr><th>章</th><th>分</th><th>目标</th><th>偏差</th><th>判定</th></tr>';
+    let html = '<table><tr><th>章</th><th>分</th><th>目标</th><th>偏差</th><th>判定</th><th>token</th></tr>';
+    let sumTok = 0, sumSc = 0;
     for (const row of r.rows) {
       const dv = (row.deviation > 0 ? '+' : '') + row.deviation;
       const cls = row.verdict === 'pass' ? 'pass' : (row.verdict === 'violated' ? 'violated' : 'drifted');
+      if (typeof row.tokens === 'number') sumTok += row.tokens;
+      sumSc += row.score;
       html += '<tr><td>' + row.chapter + '</td><td>' + row.score + '</td><td>' + row.target
-           + '</td><td>' + dv + '</td><td class="' + cls + '">' + row.verdict + '</td></tr>';
+           + '</td><td>' + dv + '</td><td class="' + cls + '">' + row.verdict + '</td><td>'
+           + (row.tokens === null ? '<span class="muted">—</span>' : row.tokens) + '</td></tr>';
     }
+    // 合计：20 章长跑时一眼看总账，不用自己加
+    html += '<tr><td><b>合计</b></td><td><b>' + Math.round(sumSc / r.rows.length) + '</b>'
+         + '<span class="muted">（均）</span></td><td>—</td><td>—</td><td>—</td><td><b>'
+         + sumTok + '</b></td></tr>';
     html += '</table>';
     box.innerHTML = html;
   } catch (e) {
@@ -1010,9 +1097,10 @@ class Handler(BaseHTTPRequestHandler):
                             "target": r["target"],
                             "deviation": r["deviation"],
                             "verdict": r["verdict"],
+                            "tokens": r["tokens"],
                         }
                         for r in conn.execute(
-                            "SELECT chapter, score, target, deviation, verdict"
+                            "SELECT chapter, score, target, deviation, verdict, tokens"
                             " FROM chapter_scores WHERE book_id = ? ORDER BY chapter",
                             (book,),
                         )
@@ -1049,6 +1137,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._character_remove(book, body)
             elif parsed.path == "/api/curve":
                 self._curve(book, body)
+            elif parsed.path == "/api/arc":
+                self._arc(book, body)
+            elif parsed.path == "/api/plan":
+                self._plan(book, body)
             elif parsed.path == "/api/curve/adjust":
                 self._curve_adjust(book, body)
             elif parsed.path == "/api/write":
@@ -1290,14 +1382,72 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
 
-    def _write(self, book: str, body: dict) -> None:
+    def _arc(self, book: str, body: dict) -> None:
+        """卷纲：**人**给的总纲，原文照收，走向不改写。"""
+        plan = str(body.get("plan") or "").strip()
+        if not plan:
+            self._fail("卷纲不能空")
+            return
+
+        def _opt(name: str) -> int | None:
+            raw = str(body.get(name) or "").strip()
+            return int(raw) if raw.isdigit() else None
+
+        r = _make_orc(book, False).registry.call(
+            "trend",
+            "set_arc",
+            book_id=book,
+            volume=int(body.get("volume") or 1),
+            plan=plan,
+            title=str(body.get("title") or ""),
+            from_chapter=_opt("from_chapter"),
+            to_chapter=_opt("to_chapter"),
+        )
+        self._json(r)
+
+    def _plan(self, book: str, body: dict) -> None:
+        """让走向把卷纲切成「本章指令」。
+
+        人物表与前情由编排层读出来喂进去 —— 走向不自己去读别人的库（隔离还在），
+        写手也永远看不到卷纲原文。
+        """
         chapter = int(body.get("chapter") or 1)
-        brief = str(body.get("brief") or "").strip()
         real = bool(body.get("real_model"))
         style = str(body.get("style") or "").strip()[:20] or "日常"
-        if not brief:
-            self._fail("大纲不能空")
-            return
+        reg = _make_orc(book, real, style).registry
+
+        chars = reg.call("writer", "get_characters", book_id=book, chapter=chapter)
+        cast_hint = "\n".join(
+            f"- {c.name}（{c.importance}）：{c.profile}；当前 {c.state}" for c in chars
+        )
+        wv = reg.call("writer", "get_worldview", book_id=book)
+        recap = wv.get("recap") or []
+        previous = "\n".join(
+            f"- 第 {r['chapter']} 章：{r['summary']}" for r in reversed(recap)
+        )
+        r = reg.call(
+            "trend",
+            "plan_chapter",
+            book_id=book,
+            chapter=chapter,
+            cast_hint=cast_hint,
+            previous=previous,
+        )
+        self._json({"ok": True, **r})
+
+    def _write(self, book: str, body: dict) -> None:
+        chapter = int(body.get("chapter") or 1)
+        # 这里是「本章指令」不是「人写的大纲」：走向出的、人可改。
+        # 人改过就落库并打 by_human=1 —— 将来查得到这一笔是谁下的。
+        directive = str(body.get("directive") or body.get("brief") or "").strip()
+        real = bool(body.get("real_model"))
+        style = str(body.get("style") or "").strip()[:20] or "日常"
+        if directive:
+            with contextlib.suppress(Exception):
+                _make_orc(book, False, style).registry.call(
+                    "trend", "save_plan_edit",
+                    book_id=book, chapter=chapter, directive=directive,
+                )
         # 没曲线就直接说人话。写手那边抛的是 LookupError（「第 1 章的曲线不存在」），
         # 到页面上就成了一条看不懂的报错——新书第一次写章几乎必踩。
         conn = db.connect("trend.db")
@@ -1312,7 +1462,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"这本书还没有第 {chapter} 章的曲线：先去 ③ 生成或手填，再写这一章", 400
             )
             return
-        r = _make_orc(book, real, style).write_chapter(chapter, brief)
+        r = _make_orc(book, real, style).write_chapter(chapter, directive)
         self._json({
             "ok": True,
             "chapter": r.chapter,

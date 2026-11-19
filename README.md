@@ -92,13 +92,13 @@ flowchart TB
 隔离由代码强制，而非依赖提示词约束：见 [`src/novel_mas/tools/registry.py`](src/novel_mas/tools/registry.py)
 的工具白名单，以及 `tests/selfcheck.py` 中的四条越权断言。
 
-## 工具清单（19 个）
+## 工具清单（28 个）
 
 | 角色 | 数 | 工具 | 可写库 |
 |---|---|---|---|
-| 世界意志 | 6 | `check_consistency` `record_event` `record_minor_event` `link_events` `manage_random` `inject_event` | 仅 `world.db` |
-| 人物控制 | 3 | `random_character` `import_character` `score_in_character` | 仅 `char.db` |
-| 世界走向 | 3 | `set_ending_intent` `set_curve` `score_direction` | 仅 `trend.db` |
+| 世界意志 | 8 | `check_consistency` `record_event` `record_minor_event` `link_events` `manage_random` `inject_event` `set_worldview` `remove_worldview` | 仅 `world.db` |
+| 人物控制 | 5 | `random_character` `import_character` `score_in_character` `advance_state` `remove_character` | 仅 `char.db` |
+| 世界走向 | 8 | **判情绪**：`set_ending_intent` `set_curve` `score_direction`；**管内容**：`set_arc` `get_arc` `plan_chapter` `save_plan_edit` `check_plan_compliance` | 仅 `trend.db` |
 | 验收 acceptor | 2 | `review_article` `arbitrate` | 不可写（跨三库只读） |
 | 写作 writer | 5 | `set_style` `get_curve` `get_characters` `get_worldview` `link_minor_events` | 不可写（无任何写库工具） |
 
@@ -323,6 +323,7 @@ print(r.brief())
 | `src/novel_mas/orchestrator.py` | 七步编排、判定链、重写闭环 |
 | `src/novel_mas/llm.py` | `Provider` 协议、`FakeProvider`、`judge_mode()`、token 记账 |
 | `src/novel_mas/web.py` | 表单式简易界面（端口 8787） |
+| `src/novel_mas/agentlog.py` | 角色日志：五个角色各自留痕（`python -m novel_mas.agentlog` 看） |
 | `start-app.bat` / `start-app.ps1` | Windows 桌面启动器：起服务 + 开应用窗口，关窗即退 |
 | `schemas/all.sql` | 三个库的建表 SQL |
 | `docs/architecture.md` | 设计取舍与已知问题 |

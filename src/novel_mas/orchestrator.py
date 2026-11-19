@@ -34,6 +34,7 @@ from pathlib import Path
 
 from .agents import bootstrap
 from .db import base as db
+from . import agentlog
 from .llm import FakeProvider, Provider, author_mode, env_number, judge_mode, metered
 from .tools.registry import ToolRegistry
 from .types import Event, EventKind, TrendVerdict, Verdict
@@ -214,7 +215,48 @@ class Orchestrator:
 
     # ---------------- 写一章（七步全走工具） ----------------
 
+    @staticmethod
+    def _load_plan(book: str, chapter: int) -> dict | None:
+        """读本章指令（走向写的，或人改过的）。
+
+        这里直连库，理由和 chapter_scores 那处一样：`chapter_plan` 记的是
+        **编排契约**（这一章该写什么），不是任何 agent 的领地 —— 走向写进去，
+        编排层读出来喂给写手，谁都不该替它加一层工具壳。
+        """
+        conn = db.connect("trend.db")
+        try:
+            row = conn.execute(
+                "SELECT volume,directive,cast_names,forbidden,target,by_human"
+                " FROM chapter_plan WHERE book_id = ? AND chapter = ?",
+                (book, int(chapter)),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {
+            "volume": row["volume"],
+            "directive": row["directive"],
+            "cast": json.loads(row["cast_names"] or "[]"),
+            "forbidden": json.loads(row["forbidden"] or "[]"),
+            "target": row["target"],
+            "by_human": bool(row["by_human"]),
+        }
+
     def write_chapter(
+        self,
+        chapter: int,
+        brief: str,
+        mock_text: str | None = None,
+        max_retries: int = 1,
+    ) -> WriteResult:
+        # 整章挂上上下文：这一章里不管哪个角色写日志，都自动带书号和章号。
+        # 挂在最外层而不是每个调用点分别传，是为了不漏 ——
+        # `check_consistency` 这种工具根本不接 book_id 参数。
+        with agentlog.bind(book_id=self.book_id, chapter=chapter):
+            return self._write_chapter(chapter, brief, mock_text, max_retries)
+
+    def _write_chapter(
         self,
         chapter: int,
         brief: str,
@@ -223,19 +265,54 @@ class Orchestrator:
     ) -> WriteResult:
         reg, book = self.registry, self.book_id
 
+        # token 计数器在 provider 上是**累计**的：同一个 Orchestrator 连着写 20 章，
+        # 直接读 `tokens_used` 会越读越大。先记下起点，落库时存「本章」的增量。
+        tokens_before = int(getattr(self.llm, "tokens_used", 0) or 0)
+
         # 1. 定文风
         style = reg.call("writer", "set_style", book_id=book, preset=self.style)["resolved"]
 
         # 2. 取本章曲线
         curve = reg.call("writer", "get_curve", book_id=book, chapter=chapter)
 
-        # 3. 取人物快照
+        # 3. 取人物快照，但**先看本章指令的 cast**：
+        #    写手只该看到这一章要上场的人。别的卷的主角不进它的视野 ——
+        #    否则它会把六个人拉到一个台子上，还顺手互相点评。
         chars = reg.call("writer", "get_characters", book_id=book, chapter=chapter)
+        plan = self._load_plan(book, chapter)
+        cast_filter_note = ""
+        if plan and plan["cast"]:
+            allowed = set(plan["cast"])
+            kept = [c for c in chars if c.name in allowed]
+            if kept:
+                cast_filter_note = (
+                    f"本章 cast {len(allowed)} 人，人物档从 {len(chars)} 收到 {len(kept)}"
+                )
+                chars = kept
+            else:
+                # 名字对不上（人改了名字 / cast 写了别名）——不静默失败，留痕
+                cast_filter_note = (
+                    f"指令里 cast={sorted(allowed)} 一个人档都没匹配上，按全员给（要修）"
+                )
+
+        # 指令优先：人填的大纲若空，就用走向给的指令；两个都空就报错，别硬写
+        brief = (brief or "").strip()
+        if not brief and plan:
+            brief = plan["directive"]
+        if not brief:
+            raise ValueError(
+                "这一章没有指令也没有大纲：先在「④ 写这一章」点「让走向出指令」，"
+                "或手填一段大纲"
+            )
 
         # 4. 取世界观 + 硬约束 + 前情
         wv = reg.call("writer", "get_worldview", book_id=book)
         entries, constraints = wv["entries"], wv["constraints"]
         recap = wv.get("recap") or []
+
+        # 标签要如实：有指令就写「本章指令」，退回手填大纲时写「大纲」。
+        # 别让写手以为自己在照人的原话写，其实吃的是走向加工过的一手。
+        brief_label = "本章指令" if plan else "大纲"
 
         # 5. 写正文（这一步是写手的笔，不是工具）
         char_block = "\n".join(
@@ -254,8 +331,7 @@ class Orchestrator:
             f"【本章目标】第 {chapter} 章，走向分目标 {curve.target}"
             f"（容差 ±{curve.tolerance}）\n"
             f"【前情】\n{recap_block}\n"
-            f"【大纲】{brief}\n"
-            f"【人物】\n{char_block}\n"
+            f"【{brief_label}】{brief}\n"            f"【人物】\n{char_block}\n"
             f"【世界观】\n{world_block}\n"
             f"【硬约束】{constraints or '无'}\n"
             f"【篇幅】正文 {WORDS_MIN}–{WORDS_MAX} 字（含标点），目标中段 2800 字左右。\n"
@@ -272,12 +348,21 @@ class Orchestrator:
         arbitrations: list[dict] = []    # 仲裁记录（可能有多次重写）
         cost: dict[str, int] = {}        # token 按角色分账：多花的钱花在写作还是审查？
 
+        arbitration_note = ""
+        compliance: dict | None = None
         for attempt in range(retry_budget + 1):
             attempts = attempt + 1
             if mock_text is not None:
                 text = mock_text
             else:
-                with metered(cost, "writer", self.llm), author_mode(
+                with metered(
+                    cost,
+                    "writer",
+                    self.llm,
+                    f"写正文（第 {attempts} 稿）",
+                    book_id=book,
+                    chapter=chapter,
+                ), author_mode(
                     self.llm, self.author_temperature, self.author_top_p
                 ):
                     text = self.llm.complete(base_prompt + feedback)
@@ -286,13 +371,17 @@ class Orchestrator:
             #
             # 判官一律走 judge_mode：尺子用 0.1，写正文用 0.8。
             # 实测 0.8 下同一份正文在 55~72 之间跳，0.1 下三次都是 64。
-            with metered(cost, "world_will", self.llm), judge_mode(self.llm):
+            with metered(
+                cost, "world_will", self.llm, "过闸检查", book_id=book, chapter=chapter
+            ), judge_mode(self.llm):
                 judgment = reg.call(
                     "world_will", "check_consistency", claim=text, chapter=chapter
                 )
 
             # 7. 走向打分（模型抽事件 + Python 按口径算分）
-            with metered(cost, "trend", self.llm), judge_mode(self.llm):
+            with metered(
+                cost, "trend", self.llm, "走向打分", book_id=book, chapter=chapter
+            ), judge_mode(self.llm):
                 scored = reg.call(
                     "trend", "score_direction", book_id=book, text=text, chapter=chapter
                 )
@@ -306,7 +395,14 @@ class Orchestrator:
             for c in chars:
                 if c.importance != "lead":
                     continue
-                with metered(cost, "character", self.llm), judge_mode(self.llm):
+                with metered(
+                    cost,
+                    "character",
+                    self.llm,
+                    f"人物评分（{c.name}）",
+                    book_id=book,
+                    chapter=chapter,
+                ), judge_mode(self.llm):
                     char_reviews.append(
                         reg.call(
                             "character",
@@ -318,14 +414,40 @@ class Orchestrator:
                         )
                     )
 
+            # 8.5 指令合规：该发生的发生了吗、不该露脸的人露脸了吗。
+            #     判的是**可核对清单**，不是文笔 —— 所以走向兼这一职不算
+            #     「自己出题自己打分」：名单外的人出场，谁判都一样是错。
+            compliance: dict | None = None
+            if plan:
+                with metered(
+                    cost,
+                    "trend",
+                    self.llm,
+                    "指令合规核对",
+                    book_id=book,
+                    chapter=chapter,
+                ), judge_mode(self.llm):
+                    compliance = reg.call(
+                        "trend",
+                        "check_plan_compliance",
+                        book_id=book,
+                        chapter=chapter,
+                        text=text,
+                    )
+
             # 拦不拦：硬裁判（世界 / 走向）**任一说撞了就拦**。
             # 光看世界裁判会漏 —— 走向裁判自己也有一套撞约束检查（_check_violated），
             # 它判 violated 而世界裁判说 pass 时，以前会：返回 pass、成文落盘、库里存 violated。
             # 两个裁判独立判、各自可能漏，所以取并集，不取交集。
             # 人物裁判只记不拦，见上面第 8 步的口径。
+            plan_violated = bool(
+                compliance
+                and (compliance.get("forbidden_seen") or compliance.get("new_faces"))
+            )
             blocked = (
                 judgment.verdict is Verdict.HARD_CONFLICT
                 or scored.verdict is TrendVerdict.VIOLATED
+                or plan_violated
             )
 
             char_ok = all(r["passed"] for r in char_reviews)
@@ -335,6 +457,7 @@ class Orchestrator:
             hard_blocked = (
                 judgment.verdict is Verdict.HARD_CONFLICT
                 or scored.verdict is TrendVerdict.VIOLATED
+                or plan_violated
             )
             # 全过 = 硬裁判都没事，而且人物也过
             passed_all = (not hard_blocked) and char_ok
@@ -381,7 +504,9 @@ class Orchestrator:
                 for r in char_reviews
             ]
 
-            with metered(cost, "acceptor", self.llm), judge_mode(self.llm):
+            with metered(
+                cost, "acceptor", self.llm, "仲裁", book_id=book, chapter=chapter
+            ), judge_mode(self.llm):
                 arbitration = reg.call(
                     "acceptor",
                     "arbitrate",
@@ -417,6 +542,16 @@ class Orchestrator:
             evidence.append("拦下原因：人物跑偏，重写次数用尽仍不过阈值")
         if attempts > 1:
             evidence.append(f"打回后重写了 {attempts - 1} 次")
+        if cast_filter_note:
+            evidence.append(f"人物：{cast_filter_note}")
+        if plan and compliance:
+            evidence.append(
+                "指令合规："
+                + ("通过" if compliance.get("ok") else "有问题")
+                + f"；没做到 {compliance.get('missing') or '无'}"
+                + f"；不该出场却出现 {compliance.get('forbidden_seen') or '无'}"
+                + f"；新面孔 {compliance.get('new_faces') or '无'}"
+            )
         for i, arb in enumerate(arbitrations, 1):
             evidence.append(
                 f"仲裁 #{i}：{arb['decision']}"
@@ -452,18 +587,20 @@ class Orchestrator:
         # 用 ON CONFLICT：库里已经有 UNIQUE(book_id, chapter) 兜底，
         # 不再靠「先 DELETE 再 INSERT」这种自觉写法（那正是 8 条重复的来源）。
         final_verdict = "violated" if blocked else scored.verdict.value
+        chapter_tokens = int(getattr(self.llm, "tokens_used", 0) or 0) - tokens_before
         conn = db.connect("trend.db")
         try:
             conn.execute(
                 "INSERT INTO chapter_scores"
-                "(book_id,chapter,score,target,deviation,verdict,evidence,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?)"
+                "(book_id,chapter,score,target,deviation,verdict,evidence,tokens,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(book_id, chapter) DO UPDATE SET"
                 "   score     = excluded.score,"
                 "   target    = excluded.target,"
                 "   deviation = excluded.deviation,"
                 "   verdict   = excluded.verdict,"
                 "   evidence  = excluded.evidence,"
+                "   tokens    = excluded.tokens,"
                 "   created_at= excluded.created_at",
                 (
                     book,
@@ -473,6 +610,7 @@ class Orchestrator:
                     scored.deviation,
                     final_verdict,
                     json.dumps(evidence, ensure_ascii=False),
+                    chapter_tokens,
                     _now(),
                 ),
             )

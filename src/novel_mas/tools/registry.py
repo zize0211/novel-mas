@@ -8,8 +8,11 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from .. import agentlog
 
 # key: 角色名，value: 允许持有的工具名集合
 ROLE_TOOLS: dict[str, set[str]] = {
@@ -32,11 +35,19 @@ ROLE_TOOLS: dict[str, set[str]] = {
         "advance_state",
         "remove_character",
     },
-    # 世界走向：3 个
+    # 世界走向：8 个
+    # 前 3 个只判情绪（旧职责）；后 5 个从 2026-11-19 起管内容：
+    # 卷纲（人的总纲）、本章指令（给写手的活）、合规核对（该发生的发生了吗、
+    # 不许露脸的人露脸了吗）。写手永远看不到卷纲原文。
     "trend": {
         "set_ending_intent",
         "set_curve",
         "score_direction",
+        "set_arc",
+        "get_arc",
+        "plan_chapter",
+        "save_plan_edit",
+        "check_plan_compliance",
     },
     # 测试：2 个。跨三个库**只读**。
     # review_article = 整体评审（三裁判各看一摊，它合起来读一遍）
@@ -109,7 +120,52 @@ class ToolRegistry:
         return self._tools[tool_name]
 
     def call(self, role: str, tool_name: str, **kwargs: Any) -> Any:
-        return self.get(role, tool_name).func(**kwargs)
+        """跨角色通道的唯一入口。顺手留痕：谁调了哪个工具、成不成、多久。
+
+        记的是**动作**，不记参数内容 —— 参数里有整章正文，落进日志就太肥了；
+        要查正文去 `data/out/`。日志只负责回答「谁在这一章碰了什么」。
+        越权被拒也记（ok=False）：那是该被看见的事。
+        """
+        try:
+            tool = self.get(role, tool_name)
+        except PermissionError:
+            agentlog.log_event(role, tool_name, kind="tool", ok=False, note="越权被拒")
+            raise
+
+        started = time.perf_counter()
+        # 书、章：工具参数里有就用（大部分本来就要），没有就问上下文
+        # —— `write_chapter` 整段都 bind 过，所以 check_consistency 这种
+        # 不接 book_id 的工具也不会漏。
+        where = {
+            "book_id": kwargs.get("book_id") or agentlog.current("book_id"),
+            "chapter": (
+                kwargs.get("chapter")
+                if kwargs.get("chapter") is not None
+                else agentlog.current("chapter")
+            ),
+        }
+        try:
+            result = tool.func(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            agentlog.log_event(
+                role,
+                tool_name,
+                kind="tool",
+                ok=False,
+                ms=int((time.perf_counter() - started) * 1000),
+                note=f"{type(exc).__name__}: {exc}",
+                **where,
+            )
+            raise
+        agentlog.log_event(
+            role,
+            tool_name,
+            kind="tool",
+            ok=True,
+            ms=int((time.perf_counter() - started) * 1000),
+            **where,
+        )
+        return result
 
     def can_write_db(self, role: str) -> bool:
         """写手永远 False。"""

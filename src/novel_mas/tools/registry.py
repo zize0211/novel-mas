@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 # key: 角色名，value: 允许持有的工具名集合
 ROLE_TOOLS: dict[str, set[str]] = {
-    # 世界意志：6 个
+    # 世界意志：8 个
     "world_will": {
         "check_consistency",
         "record_event",
@@ -21,6 +21,8 @@ ROLE_TOOLS: dict[str, set[str]] = {
         "link_events",
         "manage_random",
         "inject_event",
+        "set_worldview",
+        "remove_worldview",
     },
     # 人物控制：5 个
     "character": {

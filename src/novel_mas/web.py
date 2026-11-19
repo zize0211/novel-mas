@@ -257,6 +257,11 @@ PAGE = r"""<!DOCTYPE html>
 
     <section>
       <h2>本书概况 <button class="ghost" style="float:right" onclick="loadBook()">刷新</button></h2>
+      <div class="row" style="margin-bottom:10px">
+        <input id="wvTitle" placeholder="世界观标题（同名=覆盖）">
+        <div style="flex:2"><input id="wvBody" placeholder="正文一句话"></div>
+        <button class="ghost" onclick="saveWorldviewItem()">写</button>
+      </div>
       <div id="bookBox" class="muted">点「刷新」看书里有什么。</div>
     </section>
 
@@ -472,7 +477,11 @@ async function loadBook() {
     const r = await get('/api/book?book_id=' + encodeURIComponent(val('bookId') || 'demo'));
     const dash = '<span class="muted">（空）</span>';
     let html = '<b>世界观</b><br>' + (r.world.length
-      ? r.world.map(w => esc(w.title + '：' + w.body)).join('<br>') : dash);
+      ? r.world.map(w =>
+          esc(w.title + '：' + w.body)
+          + ' <button class="ghost" style="padding:0 6px;font-size:11px"'
+          + ' data-title="' + esc(w.title) + '" onclick="removeWorldview(this.dataset.title)">删</button>'
+        ).join('<br>') : dash);
     html += '<div style="margin-top:8px"><b>人物</b><br>' + (r.characters.length
       ? r.characters.map(c =>
           esc(c.name + '（' + c.importance + '｜' + (c.state || '未记') + '）')
@@ -486,6 +495,32 @@ async function loadBook() {
     if (r.curve.length) renderCurve({points: r.curve, warnings: []});
   } catch (e) {
     box.innerHTML = '<span class="bad">' + esc(e.message) + '</span>';
+  }
+}
+
+async function removeWorldview(title) {
+  if (!confirm('删掉世界观「' + title + '」？撤不回来。')) return;
+  try {
+    const r = await post('/api/worldview_remove', {book_id: val('bookId') || 'demo', title: title});
+    toast(r.message || '删了', 5000);
+    loadBook();
+  } catch (e) {
+    toast('失败：' + e.message, 6000);
+  }
+}
+
+async function saveWorldviewItem() {
+  const title = val('wvTitle');
+  const body = val('wvBody');
+  if (!title || !body) { toast('标题和正文都要填', 4000); return; }
+  try {
+    const r = await post('/api/worldview_item', {book_id: val('bookId') || 'demo', title: title, body: body});
+    toast(r.message || '写入了', 5000);
+    $('wvTitle').value = '';
+    $('wvBody').value = '';
+    loadBook();
+  } catch (e) {
+    toast('失败：' + e.message, 6000);
   }
 }
 
@@ -609,6 +644,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/worldview":
                 self._worldview(book, body)
+            elif parsed.path == "/api/worldview_item":
+                self._worldview_item(book, body)
+            elif parsed.path == "/api/worldview_remove":
+                self._worldview_remove(book, body)
             elif parsed.path == "/api/character":
                 self._character(book, body)
             elif parsed.path == "/api/character_remove":
@@ -637,6 +676,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         n = Orchestrator(book_id=book, llm=FakeProvider()).ingest_worldview(text)
         self._json({"ok": True, "message": f"灌了 {n} 条（同标题会覆盖，不会堆）"})
+
+    def _worldview_item(self, book: str, body: dict) -> None:
+        title = str(body.get("title") or "").strip()
+        text = str(body.get("body") or "").strip()
+        category = str(body.get("category") or "规则").strip()
+        if not title or not text:
+            self._fail("标题和正文都要填")
+            return
+        reg = Orchestrator(book_id=book, llm=FakeProvider()).registry
+        r = reg.call(
+            "world_will", "set_worldview",
+            book_id=book, title=title, body=text, category=category,
+        )
+        self._json({"ok": True, "message": f"写入了「{r['title']}」（同名是覆盖）"})
+
+    def _worldview_remove(self, book: str, body: dict) -> None:
+        title = str(body.get("title") or "").strip()
+        if not title:
+            self._fail("要删哪一条？标题不能空")
+            return
+        reg = Orchestrator(book_id=book, llm=FakeProvider()).registry
+        reg.call("world_will", "remove_worldview", book_id=book, title=title)
+        self._json({"ok": True, "message": f"删掉了「{title}」"})
 
     def _character(self, book: str, body: dict) -> None:
         name = str(body.get("name") or "").strip()

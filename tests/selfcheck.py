@@ -68,7 +68,7 @@ check("白名单无遗漏", lambda: (_ for _ in ()).throw(AssertionError(reg.che
 
 
 def _counts() -> None:
-    assert len(reg.names_for("world_will")) == 6
+    assert len(reg.names_for("world_will")) == 8
     assert len(reg.names_for("character")) == 5
     assert len(reg.names_for("trend")) == 3
     assert len(reg.names_for("writer")) == 5
@@ -217,6 +217,69 @@ def _state_by_chapter() -> None:
 
 
 check("状态随章取，旧章不被未来覆盖", _state_by_chapter)
+
+print("=== 7. 世界观单条可改可删 ===")
+
+
+def _worldview_editable() -> None:
+    from novel_mas.agents.world_will import WorldWill
+    from novel_mas.llm import FakeProvider
+    from novel_mas.orchestrator import Orchestrator
+
+    book = "selfcheck-wv"
+    # 先清场：自检不能依赖上一次跑剩下的数据，否则 version 会一路往上爬
+    conn = db.connect("world.db")
+    try:
+        conn.execute("DELETE FROM world_bible WHERE book_id = ?", (book,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    ww = WorldWill(book_id=book)
+    ww.set_worldview(book, "雨", "雨从不停", "地理")
+    ww.set_worldview(book, "雨", "雨小了些", "地理")
+
+    conn = db.connect("world.db")
+    try:
+        rows = conn.execute(
+            "SELECT body, version FROM world_bible WHERE book_id = ? AND title = '雨'",
+            (book,),
+        ).fetchall()
+        assert len(rows) == 1, [dict(r) for r in rows]
+        assert rows[0]["body"] == "雨小了些", dict(rows[0])
+        assert rows[0]["version"] == 2, dict(rows[0])
+    finally:
+        conn.close()
+
+    # 整段重灌：句数变少时旧条目不能留成孤儿
+    orc = Orchestrator(book_id=book, llm=FakeProvider())
+    orc.ingest_worldview("甲。乙。丙。")
+    orc.ingest_worldview("丁。")
+    conn = db.connect("world.db")
+    try:
+        left = conn.execute(
+            "SELECT title, body FROM world_bible WHERE book_id = ?", (book,)
+        ).fetchall()
+        assert len(left) == 2, [dict(r) for r in left]  # 「雨」+「条目1」
+    finally:
+        conn.close()
+
+    ww.remove_worldview(book, "雨")
+    try:
+        ww.remove_worldview(book, "雨")
+        raise AssertionError("删不存在的条目应当抛 LookupError")
+    except LookupError:
+        pass
+
+    conn = db.connect("world.db")
+    try:
+        conn.execute("DELETE FROM world_bible WHERE book_id = ?", (book,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+check("世界观可改可删，重灌不留孤儿", _worldview_editable)
 
 print()
 print(f"通过 {passed} 项，失败 {len(failed)} 项")

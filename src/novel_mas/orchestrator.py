@@ -118,6 +118,14 @@ class Orchestrator:
         conn = db.connect("world.db")
         n = 0
         try:
+            # 重灌 = 替换「上一次整段灌进来的那批」（标题是 条目N）。
+            # 只按「条目N」覆盖是不够的：上次 5 句、这次 3 句，条目4/5 会留成孤儿。
+            # 但别把用户手动写的单条（标题自己取的）也删了 —— 那是另一回事。
+            conn.execute(
+                "DELETE FROM world_bible"
+                " WHERE book_id = ? AND source = 'user_inject' AND title LIKE '条目%'",
+                (self.book_id,),
+            )
             for i, body in enumerate(parts, 1):
                 conn.execute(
                     # OR REPLACE：重灌世界观是覆盖，不是一路追加。

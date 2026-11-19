@@ -512,6 +512,61 @@ class WorldWill(BaseAgent):
         ]
 
 
+    def set_worldview(
+        self, book_id: str, title: str, body: str, category: str = "规则"
+    ) -> dict:
+        """单条世界观：有则改，无则加。
+
+        为什么要有这个：整段重灌只能按「条目1/条目2」覆盖，想改其中一条
+        的措辞就得整段重写，风险大还容易改错行。
+        """
+        title, body = (title or "").strip(), (body or "").strip()
+        if not title or not body:
+            raise ValueError("标题和正文都不能空")
+        conn = db.connect("world.db")
+        try:
+            conn.execute(
+                "INSERT INTO world_bible"
+                "(book_id, category, title, body, version, source, created_at)"
+                " VALUES(?,?,?,?,?,?,?)"
+                " ON CONFLICT(book_id, title) DO UPDATE SET"
+                "   body = excluded.body,"
+                "   category = excluded.category,"
+                "   version = world_bible.version + 1",
+                (
+                    book_id,
+                    category or "规则",
+                    title,
+                    body,
+                    1,
+                    "user_inject",
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "title": title, "body": body}
+
+    def remove_worldview(self, book_id: str, title: str) -> dict:
+        """删掉一条世界观。标题对不上就报错，不猜。"""
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("要删哪一条？标题不能空")
+        conn = db.connect("world.db")
+        try:
+            cur = conn.execute(
+                "DELETE FROM world_bible WHERE book_id = ? AND title = ?",
+                (book_id, title),
+            )
+            if cur.rowcount == 0:
+                raise LookupError(f"{book_id} 里没有标题「{title}」的世界观条目")
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "title": title}
+
+
 # 供 registry 注册用
 def bind(registry, llm=None, book_id: str = "demo") -> None:
     # book_id 必须传进来：不然这个 agent 永远读 demo 那本书的约束，
@@ -523,3 +578,5 @@ def bind(registry, llm=None, book_id: str = "demo") -> None:
     registry.register("link_events", agent.link_events)
     registry.register("manage_random", agent.manage_random)
     registry.register("inject_event", agent.inject_event)
+    registry.register("set_worldview", agent.set_worldview)
+    registry.register("remove_worldview", agent.remove_worldview)

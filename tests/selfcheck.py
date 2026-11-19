@@ -281,6 +281,44 @@ def _worldview_editable() -> None:
 
 check("世界观可改可删，重灌不留孤儿", _worldview_editable)
 
+print("=== 8. 书：列表 / 改名 / 删除 ===")
+
+
+def _book_ops() -> None:
+    import json as _json
+
+    from novel_mas import web
+    from novel_mas.agents.world_will import WorldWill
+    from novel_mas.llm import FakeProvider
+    from novel_mas.orchestrator import Orchestrator
+
+    old, new = "q1-old", "q1-new"
+    ww = WorldWill(book_id=old)
+    ww.set_worldview(old, "雨", "雨从不停")
+    Orchestrator(book_id=old, llm=FakeProvider()).ingest_worldview("甲。乙。")
+
+    overview = web.books_overview()
+    ids = [b["book_id"] for b in overview]
+    assert old in ids, ids
+    stat = next(b for b in overview if b["book_id"] == old)
+    assert stat["world"] == 3, stat      # 雨 + 条目1 + 条目2
+
+    moved = web.rename_book(old, new)
+    assert moved >= 3, moved
+    ids = [b["book_id"] for b in web.books_overview()]
+    assert new in ids and old not in ids, ids
+
+    removed, backup = web.delete_book(new)
+    assert removed >= 3, removed
+    assert backup.exists(), backup
+    dumped = _json.loads(backup.read_text(encoding="utf-8"))
+    assert any("world_bible" in k for k in dumped), list(dumped)
+    assert new not in [b["book_id"] for b in web.books_overview()]
+    backup.unlink(missing_ok=True)
+
+
+check("书能列出来、改名、删除（删除先备份）", _book_ops)
+
 print()
 print(f"通过 {passed} 项，失败 {len(failed)} 项")
 if failed:

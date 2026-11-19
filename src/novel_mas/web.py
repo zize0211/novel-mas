@@ -46,6 +46,18 @@ def _env_path() -> Path:
 
 
 ENV_PATH = _env_path()
+TRASH_DIR = db.DATA_DIR / "trash"
+
+
+def _book_tables(conn) -> list[str]:
+    """这个库里带 book_id 列的表。没这一列的表不参与开关书。"""
+    out: list[str] = []
+    for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'"):
+        t = r["name"]
+        cols = {c["name"] for c in conn.execute(f"PRAGMA table_info({t})")}
+        if "book_id" in cols:
+            out.append(t)
+    return out
 
 
 def _demo_curve(prompt: str, chapters: int = 20) -> list[CurvePoint]:
@@ -184,7 +196,10 @@ PAGE = r"""<!DOCTYPE html>
   <div class="book">
     <label style="margin:0">书号</label>
     <input id="bookId" value="demo" style="width:140px">
-    <button class="ghost" onclick="loadHistory()">刷新历史</button>
+    <select id="bookSel" onchange="pickBook()" style="width:210px"><option value="">— 已有的书 —</option></select>
+    <button class="ghost" onclick="refreshAll()">刷新</button>
+    <button class="ghost" onclick="renameBook()">改名</button>
+    <button class="ghost" onclick="deleteBook()">删书</button>
   </div>
 </header>
 
@@ -553,6 +568,59 @@ async function removeCharacter(name) {
   }
 }
 
+async function loadBooks() {
+  try {
+    const r = await get('/api/books');
+    const cur = val('bookId') || 'demo';
+    const sel = $('bookSel');
+    sel.innerHTML = '<option value="">— 已有的书 —</option>' + r.books.map(b =>
+      '<option value="' + esc(b.book_id) + '"' + (b.book_id === cur ? ' selected' : '') + '>'
+      + esc(b.book_id) + '（世界观' + b.world + '·人物' + b.characters
+      + '·曲线' + b.curve + '·章' + b.chapters + '）</option>').join('');
+  } catch (e) {
+    // 列不出来不算致命，别打断页面
+  }
+}
+
+function pickBook() {
+  const v = $('bookSel').value;
+  if (!v) return;
+  $('bookId').value = v;
+  refreshAll();
+}
+
+async function refreshAll() {
+  await Promise.all([loadBook(), loadHistory(), loadBooks()]);
+}
+
+async function renameBook() {
+  const old = val('bookId');
+  if (!old) { toast('先填书号', 3000); return; }
+  const name = prompt('把「' + old + '」改成什么？（数据会整体搬过去）', old);
+  if (!name || name === old) return;
+  try {
+    const r = await post('/api/book_rename', {book_id: old, new_id: name});
+    $('bookId').value = name;
+    toast(r.message, 6000);
+    refreshAll();
+  } catch (e) {
+    toast('失败：' + e.message, 7000);
+  }
+}
+
+async function deleteBook() {
+  const b = val('bookId');
+  if (!b) { toast('先填书号', 3000); return; }
+  if (!confirm('删掉「' + b + '」整本书？\n会先备份到 data/trash/，但界面上撤不回来。')) return;
+  try {
+    const r = await post('/api/book_delete', {book_id: b});
+    toast(r.message, 9000);
+    refreshAll();
+  } catch (e) {
+    toast('失败：' + e.message, 7000);
+  }
+}
+
 async function loadHistory() {
   const box = $('history');
   try {
@@ -575,10 +643,100 @@ async function loadHistory() {
 loadHistory();
 loadConfig();
 loadBook();
+loadBooks();
 </script>
 </body>
 </html>
 """
+
+
+def _count(db_name: str, table: str, book: str) -> int:
+    conn = db.connect(db_name)
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS c FROM {table} WHERE book_id = ?", (book,)
+        ).fetchone()
+        return int(row["c"])
+    finally:
+        conn.close()
+
+
+def _book_stats(book: str) -> dict:
+    return {
+        "world": _count("world.db", "world_bible", book),
+        "characters": _count("char.db", "characters", book),
+        "curve": _count("trend.db", "curve", book),
+        "chapters": _count("trend.db", "chapter_scores", book),
+    }
+
+
+def books_overview() -> list[dict]:
+    """库里有哪些书，各有多少东西。
+
+    书不是独立的库文件，是每张表的 book_id 列，所以要扫全表才看得见。
+    """
+    found: set[str] = set()
+    for name in db.DB_NAMES:
+        conn = db.connect(name)
+        try:
+            for t in _book_tables(conn):
+                for r in conn.execute(f"SELECT DISTINCT book_id FROM {t}"):
+                    found.add(str(r["book_id"]))
+        finally:
+            conn.close()
+    return [{"book_id": b, **_book_stats(b)} for b in sorted(found)]
+
+
+def rename_book(old: str, new: str) -> int:
+    """把一本书的 book_id 整体改掉，返回动了多少行。"""
+    moved = 0
+    for name in db.DB_NAMES:
+        conn = db.connect(name)
+        try:
+            for t in _book_tables(conn):
+                moved += conn.execute(
+                    f"UPDATE {t} SET book_id = ? WHERE book_id = ?", (new, old)
+                ).rowcount
+            conn.commit()
+        finally:
+            conn.close()
+    return moved
+
+
+def delete_book(book: str) -> tuple[int, Path]:
+    """删整本书：先导 JSON 备份，再逐表删。返回（删了多少行, 备份路径）。
+
+    这是真删，没有回收站。备份是整个删除流程的一部分，不是可选项。
+    """
+    TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = TRASH_DIR / f"{book}-{stamp}.json"
+    dump: dict[str, list[dict]] = {}
+    for name in db.DB_NAMES:
+        conn = db.connect(name)
+        try:
+            for t in _book_tables(conn):
+                rows = conn.execute(
+                    f"SELECT * FROM {t} WHERE book_id = ?", (book,)
+                ).fetchall()
+                if rows:
+                    dump[f"{name}:{t}"] = [dict(r) for r in rows]
+        finally:
+            conn.close()
+    backup.write_text(json.dumps(dump, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    removed = 0
+    for name in db.DB_NAMES:
+        conn = db.connect(name)
+        try:
+            for t in _book_tables(conn):
+                removed += conn.execute(
+                    f"DELETE FROM {t} WHERE book_id = ?", (book,)
+                ).rowcount
+            conn.commit()
+        finally:
+            conn.close()
+    return removed, backup
 
 
 def _make_orc(book_id: str, real_model: bool, style: str = "日常") -> Orchestrator:
@@ -615,6 +773,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/config":
             self._config_get()
+            return
+        if parsed.path == "/api/books":
+            self._books()
             return
         if parsed.path == "/api/book":
             qs = parse_qs(parsed.query)
@@ -676,6 +837,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._write(book, body)
             elif parsed.path == "/api/config":
                 self._config_post(body)
+            elif parsed.path == "/api/book_rename":
+                self._book_rename(book, body)
+            elif parsed.path == "/api/book_delete":
+                self._book_delete(book)
             else:
                 self._fail("没有这个路径", 404)
         except (LookupError, ValueError) as exc:
@@ -717,6 +882,39 @@ class Handler(BaseHTTPRequestHandler):
         reg = Orchestrator(book_id=book, llm=FakeProvider()).registry
         reg.call("world_will", "remove_worldview", book_id=book, title=title)
         self._json({"ok": True, "message": f"删掉了「{title}」"})
+
+    def _books(self) -> None:
+        self._json({"ok": True, "books": books_overview()})
+
+    def _book_rename(self, old: str, body: dict) -> None:
+        new = str(body.get("new_id") or "").strip()
+        if not new:
+            self._fail("新书号不能空")
+            return
+        if new == old:
+            self._fail("新旧一样，没改")
+            return
+        # 改到已有的书 = 两本书合并，几乎一定不是用户想要的
+        if any(b["book_id"] == new for b in books_overview()):
+            self._fail(f"已经有「{new}」这本书了；改名会合并数据，换个名字或先删掉它", 400)
+            return
+        moved = rename_book(old, new)
+        if moved == 0:
+            self._fail(f"库里没有「{old}」这本书", 400)
+            return
+        self._json({"ok": True, "message": f"「{old}」改名为「{new}」，动了 {moved} 行"})
+
+    def _book_delete(self, book: str) -> None:
+        if not any(b["book_id"] == book for b in books_overview()):
+            self._fail(f"库里没有「{book}」这本书", 400)
+            return
+        removed, backup = delete_book(book)
+        self._json(
+            {
+                "ok": True,
+                "message": f"删掉了「{book}」，共 {removed} 行；备份在 data/trash/{backup.name}",
+            }
+        )
 
     def _character(self, book: str, body: dict) -> None:
         name = str(body.get("name") or "").strip()

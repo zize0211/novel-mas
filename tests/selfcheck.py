@@ -316,6 +316,12 @@ def _book_ops() -> None:
     assert new not in [b["book_id"] for b in web.books_overview()]
     backup.unlink(missing_ok=True)
 
+    # 备份可选：关掉就不该留文件
+    ww.set_worldview(new, "雨", "雨从不停")
+    removed2, no_backup = web.delete_book(new, backup=False)
+    assert removed2 >= 1, removed2
+    assert no_backup is None, no_backup
+
 
 check("书能列出来、改名、删除（删除先备份）", _book_ops)
 

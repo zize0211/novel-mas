@@ -199,6 +199,9 @@ PAGE = r"""<!DOCTYPE html>
     <select id="bookSel" onchange="pickBook()" style="width:210px"><option value="">— 已有的书 —</option></select>
     <button class="ghost" onclick="refreshAll()">刷新</button>
     <button class="ghost" onclick="renameBook()">改名</button>
+    <label style="margin:0;font-size:12px;display:flex;align-items:center;gap:4px">
+      <input type="checkbox" id="delBackup" checked>删前备份
+    </label>
     <button class="ghost" onclick="deleteBook()">删书</button>
   </div>
 </header>
@@ -611,9 +614,13 @@ async function renameBook() {
 async function deleteBook() {
   const b = val('bookId');
   if (!b) { toast('先填书号', 3000); return; }
-  if (!confirm('删掉「' + b + '」整本书？\n会先备份到 data/trash/，但界面上撤不回来。')) return;
+  const backup = $('delBackup').checked;
+  const tip = backup
+    ? '会先把这本书导成 JSON 放到 data/trash/。'
+    : '**不备份**，删掉就真没了。';
+  if (!confirm('删掉「' + b + '」整本书？\n' + tip)) return;
   try {
-    const r = await post('/api/book_delete', {book_id: b});
+    const r = await post('/api/book_delete', {book_id: b, backup: backup});
     toast(r.message, 9000);
     refreshAll();
   } catch (e) {
@@ -703,27 +710,32 @@ def rename_book(old: str, new: str) -> int:
     return moved
 
 
-def delete_book(book: str) -> tuple[int, Path]:
-    """删整本书：先导 JSON 备份，再逐表删。返回（删了多少行, 备份路径）。
+def delete_book(book: str, backup: bool = True) -> tuple[int, Path | None]:
+    """删整本书：默认先导 JSON 备份，再逐表删。返回（删了多少行, 备份路径或 None）。
 
-    这是真删，没有回收站。备份是整个删除流程的一部分，不是可选项。
+    备份可以关掉（`backup=False`）：有人就是不要留垃圾文件。
+    但如果关了，删掉的东西就真没有了 —— 界面上必须说清楚。
     """
-    TRASH_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = TRASH_DIR / f"{book}-{stamp}.json"
-    dump: dict[str, list[dict]] = {}
-    for name in db.DB_NAMES:
-        conn = db.connect(name)
-        try:
-            for t in _book_tables(conn):
-                rows = conn.execute(
-                    f"SELECT * FROM {t} WHERE book_id = ?", (book,)
-                ).fetchall()
-                if rows:
-                    dump[f"{name}:{t}"] = [dict(r) for r in rows]
-        finally:
-            conn.close()
-    backup.write_text(json.dumps(dump, ensure_ascii=False, indent=1), encoding="utf-8")
+    backup_path: Path | None = None
+    if backup:
+        TRASH_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = TRASH_DIR / f"{book}-{stamp}.json"
+        dump: dict[str, list[dict]] = {}
+        for name in db.DB_NAMES:
+            conn = db.connect(name)
+            try:
+                for t in _book_tables(conn):
+                    rows = conn.execute(
+                        f"SELECT * FROM {t} WHERE book_id = ?", (book,)
+                    ).fetchall()
+                    if rows:
+                        dump[f"{name}:{t}"] = [dict(r) for r in rows]
+            finally:
+                conn.close()
+        backup_path.write_text(
+            json.dumps(dump, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
 
     removed = 0
     for name in db.DB_NAMES:
@@ -736,7 +748,7 @@ def delete_book(book: str) -> tuple[int, Path]:
             conn.commit()
         finally:
             conn.close()
-    return removed, backup
+    return removed, backup_path
 
 
 def _make_orc(book_id: str, real_model: bool, style: str = "日常") -> Orchestrator:
@@ -840,7 +852,7 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/book_rename":
                 self._book_rename(book, body)
             elif parsed.path == "/api/book_delete":
-                self._book_delete(book)
+                self._book_delete(book, body)
             else:
                 self._fail("没有这个路径", 404)
         except (LookupError, ValueError) as exc:
@@ -904,16 +916,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json({"ok": True, "message": f"「{old}」改名为「{new}」，动了 {moved} 行"})
 
-    def _book_delete(self, book: str) -> None:
+    def _book_delete(self, book: str, body: dict) -> None:
         if not any(b["book_id"] == book for b in books_overview()):
             self._fail(f"库里没有「{book}」这本书", 400)
             return
-        removed, backup = delete_book(book)
+        want_backup = bool(body.get("backup", True))
+        removed, path = delete_book(book, backup=want_backup)
+        tail = f"备份在 data/trash/{path.name}" if path else "没备份（你要求的）"
         self._json(
-            {
-                "ok": True,
-                "message": f"删掉了「{book}」，共 {removed} 行；备份在 data/trash/{backup.name}",
-            }
+            {"ok": True, "message": f"删掉了「{book}」，共 {removed} 行；{tail}"}
         )
 
     def _character(self, book: str, body: dict) -> None:

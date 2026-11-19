@@ -87,10 +87,12 @@ class WriteResult:
 class Orchestrator:
     """最小闭环的调度器。没有 LLM 也能跑。"""
 
-    def __init__(self, book_id: str = "demo", llm: Provider | None = None) -> None:
+    def __init__(
+        self, book_id: str = "demo", llm: Provider | None = None, style: str = "日常"
+    ) -> None:
         self.book_id = book_id
         self.llm: Provider = llm or FakeProvider()
-        self.style = "日常"
+        self.style = style
         db.migrate()
         # 每个编排者用**自己的** registry：bootstrap 默认的那个是全局单例，
         # 先用假模型建过一轮之后，再换真模型也会拿回旧的（闭包里绑着假模型）。

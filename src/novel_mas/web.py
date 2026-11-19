@@ -13,16 +13,76 @@
 from __future__ import annotations
 
 import json
+import os
 import traceback
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .db import base as db
 from .llm import FakeProvider, OpenAIProvider
 from .orchestrator import Orchestrator
+from .types import CurvePoint
 
 PORT = 8787
 HOST = "127.0.0.1"
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+
+
+def _demo_curve(prompt: str, chapters: int = 20) -> list[CurvePoint]:
+    """不花钱的演示曲线：固定形状（先缓降到底，再回暖）。
+
+    假模型不会真给 20 个点（它返回空数组），所以要给它一条能画出来的线，
+    并在响应里标 source=fake —— 别让人误以为这是模型的产物。
+    """
+    pts: list[CurvePoint] = []
+    for i in range(1, chapters + 1):
+        t = (i - 1) / (chapters - 1) if chapters > 1 else 0.0
+        if t < 0.6:
+            target = 60 - 30 * (t / 0.6)
+        else:
+            target = 30 + 40 * ((t - 0.6) / 0.4)
+        pts.append(CurvePoint(chapter=i, target=int(round(target)), tolerance=15))
+    return pts
+
+
+def _read_env() -> dict[str, str]:
+    """读 .env 成 dict（只做最简单的 KEY=VALUE，不搞变量展开）。"""
+    if not ENV_PATH.exists():
+        return {}
+    out: dict[str, str] = {}
+    for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _write_env(updates: dict[str, str]) -> Path | None:
+    """把改动写回 .env，写前备份。返回备份路径（原来没有 .env 时为 None）。"""
+    backup: Path | None = None
+    lines: list[str] = []
+    if ENV_PATH.exists():
+        backup = ENV_PATH.with_name(f".env.bak-{datetime.now():%Y%m%d-%H%M%S}")
+        backup.write_bytes(ENV_PATH.read_bytes())
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if "=" in line and key in updates:
+            out.append(f"{key}={updates[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    for k, v in updates.items():
+        if k not in seen:
+            out.append(f"{k}={v}")
+    ENV_PATH.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+    return backup
 
 
 PAGE = r"""<!DOCTYPE html>
@@ -138,7 +198,16 @@ PAGE = r"""<!DOCTYPE html>
       <h2>③ 设走向曲线</h2>
       <label>用一句话说清这一路的情绪走向</label>
       <textarea id="curvePrompt" style="min-height:56px">前十章平静，中段越来越压抑，最后两章回暖。</textarea>
-      <button onclick="act('curve', {prompt: val('curvePrompt')})">生成曲线（20 章）</button>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px">
+        <input type="checkbox" id="curveReal"> 用真模型生成（不勾也用假模型出个样子）
+      </label>
+      <label style="margin-top:12px">手填（可选，<code>章:分</code> 逗号分隔）</label>
+      <input id="curvePoints" placeholder="1:50, 2:60, 3:75">
+      <div class="row" style="margin-top:10px">
+        <button onclick="createCurve(false)">按描述生成</button>
+        <button class="ghost" onclick="createCurve(true)">按手填写入</button>
+      </div>
+      <div id="curveChart" class="muted" style="margin-top:12px">还没有曲线。</div>
     </section>
 
     <section>
@@ -146,6 +215,16 @@ PAGE = r"""<!DOCTYPE html>
       <div class="row">
         <div><label>第几章</label><input id="chapter" value="1"></div>
         <div style="flex:2"><label>大纲</label><input id="brief" value="李三在巷口捡到一枚铜钱，抬头看见钟楼上有个人影。"></div>
+      </div>
+      <label style="margin-top:10px">文风</label>
+      <div class="row">
+        <select id="style">
+          <option value="日常" selected>日常</option>
+          <option value="冷峻">冷峻</option>
+          <option value="口语化">口语化</option>
+          <option value="文言">文言</option>
+        </select>
+        <div style="flex:2"><input id="styleCustom" placeholder="自定义（留空就用左边选的）"></div>
       </div>
       <label style="display:flex;align-items:center;gap:8px;margin-top:10px">
         <input type="checkbox" id="realModel"> 用真模型（要花钱，约 3000 token）
@@ -160,6 +239,20 @@ PAGE = r"""<!DOCTYPE html>
     <section>
       <h2>最新一章</h2>
       <div id="result" class="muted">还没跑过。左边填好，点「写」。</div>
+    </section>
+
+    <section>
+      <h2>模型配置</h2>
+      <div id="cfg" class="muted">读着…</div>
+      <label style="margin-top:10px">base_url</label>
+      <input id="cfgBase" placeholder="https://api.deepseek.com/v1">
+      <label>model</label>
+      <input id="cfgModel" placeholder="deepseek-chat">
+      <div class="row" style="margin-top:10px">
+        <button onclick="saveConfig()">保存</button>
+        <button class="ghost" onclick="loadConfig()">重读</button>
+      </div>
+      <div class="muted" style="margin-top:8px">key 只从 .env 读，页面不保存也不回显；改完写回 .env 并留一份备份。</div>
     </section>
 
     <section>
@@ -228,6 +321,96 @@ async function act(what, payload) {
   }
 }
 
+async function createCurve(fromPoints) {
+  const btn = event.currentTarget;
+  busy(btn, true, '生成中…');
+  const box = $('curveChart');
+  try {
+    const book = val('bookId') || 'demo';
+    const payload = {book_id: book};
+    if (fromPoints) {
+      const raw = val('curvePoints');
+      if (!raw) throw new Error('手填框是空的，写个 1:50, 2:60 这样');
+      payload.points = raw.split(',').map(s => s.trim()).filter(Boolean).map(s => {
+        const parts = s.split(':').map(x => x.trim());
+        return {
+          chapter: parseInt(parts[0], 10),
+          target: parseInt(parts[1], 10),
+          tolerance: parts[2] ? parseInt(parts[2], 10) : 15,
+        };
+      });
+    } else {
+      payload.prompt = val('curvePrompt');
+      payload.real_model = $('curveReal').checked;
+    }
+    const r = await post('/api/curve', payload);
+    renderCurve(r);
+    toast('曲线写好了：' + r.points.length + ' 个点（' + r.source + '）');
+  } catch (e) {
+    box.innerHTML = '<span class="bad">失败：' + esc(e.message) + '</span>';
+  } finally {
+    busy(btn, false);
+  }
+}
+
+function renderCurve(r) {
+  const pts = r.points || [];
+  const box = $('curveChart');
+  if (!pts.length) { box.innerHTML = '<span class="muted">没有点。</span>'; return; }
+  const W = 320, H = 130, PAD = 18;
+  const chs = pts.map(p => p.chapter);
+  const minC = Math.min(...chs), maxC = Math.max(...chs);
+  const x = c => PAD + (maxC === minC ? (W - PAD * 2) / 2 : (c - minC) / (maxC - minC) * (W - PAD * 2));
+  const y = t => H - PAD - Math.max(0, Math.min(100, t)) / 100 * (H - PAD * 2);
+  const line = pts.map(p => x(p.chapter).toFixed(1) + ',' + y(p.target).toFixed(1)).join(' ');
+  const warnCh = new Set((r.warnings || []).map(w => w.chapter));
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="150" role="img">';
+  [0, 50, 100].forEach(v => {
+    svg += '<line x1="' + PAD + '" y1="' + y(v) + '" x2="' + (W - PAD) + '" y2="' + y(v)
+         + '" stroke="#888" stroke-opacity="0.25"' + (v === 50 ? ' stroke-dasharray="3 3"' : '') + '/>';
+  });
+  svg += '<polyline fill="none" stroke="#4a9e8f" stroke-width="2" points="' + line + '"/>';
+  for (const p of pts) {
+    svg += '<circle cx="' + x(p.chapter).toFixed(1) + '" cy="' + y(p.target).toFixed(1)
+         + '" r="2.6" fill="' + (warnCh.has(p.chapter) ? '#d9534f' : '#4a9e8f') + '"/>';
+  }
+  svg += '</svg>';
+  let html = svg;
+  if (r.warnings && r.warnings.length) {
+    html += '<ul class="ev">' + r.warnings.map(w => '<li>' + esc(w.message) + '</li>').join('') + '</ul>';
+  } else {
+    html += '<div class="muted">坡度检查：没有断崖。</div>';
+  }
+  box.innerHTML = html;
+}
+
+async function loadConfig() {
+  const box = $('cfg');
+  try {
+    const r = await get('/api/config');
+    $('cfgBase').value = r.base_url;
+    $('cfgModel').value = r.model;
+    box.innerHTML = '当前：<b>' + esc(r.model) + '</b> @ ' + esc(r.base_url)
+      + '<br>key：' + (r.has_key ? '已配置（' + esc(r.key_tail) + '）' : '<b class="bad">没有</b>');
+  } catch (e) {
+    box.innerHTML = '<span class="bad">读不到配置：' + esc(e.message) + '</span>';
+  }
+}
+
+async function saveConfig() {
+  const btn = event.currentTarget;
+  busy(btn, true, '保存中…');
+  try {
+    const r = await post('/api/config', {base_url: val('cfgBase'), model: val('cfgModel')});
+    toast(r.backup ? '已保存，旧配置备份为 ' + r.backup : '已保存');
+    loadConfig();
+  } catch (e) {
+    toast('失败：' + e.message, 5000);
+  } finally {
+    busy(btn, false);
+  }
+}
+
 async function writeChapter() {
   const btn = event.currentTarget;
   busy(btn, true, '写着…');
@@ -238,6 +421,7 @@ async function writeChapter() {
       chapter: parseInt(val('chapter') || '1', 10),
       brief: val('brief'),
       real_model: $('realModel').checked,
+      style: val('styleCustom') || val('style'),
     });
     renderResult(r);
     loadHistory();
@@ -296,15 +480,16 @@ async function loadHistory() {
 }
 
 loadHistory();
+loadConfig();
 </script>
 </body>
 </html>
 """
 
 
-def _make_orc(book_id: str, real_model: bool) -> Orchestrator:
-    llm = OpenAIProvider.from_env() if real_model else FakeProvider(style="日常")
-    return Orchestrator(book_id=book_id, llm=llm)
+def _make_orc(book_id: str, real_model: bool, style: str = "日常") -> Orchestrator:
+    llm = OpenAIProvider.from_env() if real_model else FakeProvider(style=style)
+    return Orchestrator(book_id=book_id, llm=llm, style=style)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -333,6 +518,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if parsed.path == "/api/config":
+            self._config_get()
             return
         if parsed.path == "/api/history":
             qs = parse_qs(parsed.query)
@@ -382,6 +570,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._curve(book, body)
             elif parsed.path == "/api/write":
                 self._write(book, body)
+            elif parsed.path == "/api/config":
+                self._config_post(body)
             else:
                 self._fail("没有这个路径", 404)
         except Exception as exc:  # noqa: BLE001
@@ -413,29 +603,74 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, "message": f"导入了 {snap.name}（{snap.importance}）"})
 
     def _curve(self, book: str, body: dict) -> None:
+        raw_points = body.get("points")
         prompt = str(body.get("prompt") or "").strip()
-        if not prompt:
-            self._fail("先写一句走向描述")
+        real = bool(body.get("real_model"))
+        if raw_points is None and not prompt:
+            self._fail("要么写一句走向描述，要么手填曲线点")
             return
-        reg = _make_orc(book, real_model=True).registry
-        result = reg.call("trend", "set_curve", book_id=book, prompt=prompt)
-        pts = result["curve"]
-        warnings = result["warnings"]
-        self._json({
-            "ok": True,
-            "points": len(pts),
-            "warnings": warnings,
-            "message": f"生成 {len(pts)} 个点" + (f"，{len(warnings)} 条坡度警告" if warnings else ""),
-        })
+
+        if raw_points:
+            try:
+                pts = [
+                    CurvePoint(
+                        chapter=int(p["chapter"]),
+                        target=int(p["target"]),
+                        tolerance=int(p.get("tolerance", 15)),
+                    )
+                    for p in raw_points
+                ]
+            except (KeyError, TypeError, ValueError) as exc:
+                self._fail(f"手填的点格式不对：{exc}")
+                return
+            result = _make_orc(book, False).registry.call(
+                "trend", "set_curve", book_id=book, points=pts
+            )
+            source = "manual"
+        else:
+            if real:
+                try:
+                    llm = OpenAIProvider.from_env()
+                except Exception as exc:  # noqa: BLE001
+                    self._fail(
+                        f"真模型不可用：{exc}（不勾真模型也能演示，用的是固定形状的假曲线）",
+                        400,
+                    )
+                    return
+                result = Orchestrator(book_id=book, llm=llm).registry.call(
+                    "trend", "set_curve", book_id=book, prompt=prompt
+                )
+                source = "model"
+            else:
+                # 假模型不给点（返回空数组），这里塞一条固定形状的演示曲线
+                result = _make_orc(book, False).registry.call(
+                    "trend", "set_curve", book_id=book, points=_demo_curve(prompt)
+                )
+                source = "fake"
+
+        curve = result["curve"]
+        self._json(
+            {
+                "ok": True,
+                "source": source,
+                "points": [
+                    {"chapter": p.chapter, "target": p.target, "tolerance": p.tolerance}
+                    for p in curve
+                ],
+                "warnings": result["warnings"],
+                "message": f"生成 {len(curve)} 个点",
+            }
+        )
 
     def _write(self, book: str, body: dict) -> None:
         chapter = int(body.get("chapter") or 1)
         brief = str(body.get("brief") or "").strip()
         real = bool(body.get("real_model"))
+        style = str(body.get("style") or "").strip()[:20] or "日常"
         if not brief:
             self._fail("大纲不能空")
             return
-        r = _make_orc(book, real).write_chapter(chapter, brief)
+        r = _make_orc(book, real, style).write_chapter(chapter, brief)
         self._json({
             "ok": True,
             "chapter": r.chapter,
@@ -447,8 +682,68 @@ class Handler(BaseHTTPRequestHandler):
             "tokens": r.tokens,
             "evidence": r.evidence,
             "out_path": r.out_path,
+            "style": style,
             "text": r.text,
         })
+
+    # ---------- 模型配置（只读展示 + 改端点，不碰 key） ----------
+
+    def _config_payload(self) -> dict:
+        env_file = _read_env()
+        base_url = (
+            os.environ.get("NOVEL_BASE_URL")
+            or env_file.get("NOVEL_BASE_URL")
+            or "https://api.deepseek.com/v1"
+        )
+        model = (
+            os.environ.get("NOVEL_MODEL")
+            or env_file.get("NOVEL_MODEL")
+            or "deepseek-chat"
+        )
+        key = (
+            os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("DEEPSEEK_API_KEY")
+            or env_file.get("OPENAI_API_KEY")
+            or env_file.get("DEEPSEEK_API_KEY")
+            or ""
+        ).strip()
+        return {
+            "ok": True,
+            "base_url": base_url,
+            "model": model,
+            "has_key": bool(key),
+            "key_tail": ("…" + key[-4:]) if len(key) >= 8 else "",
+            "env_file": str(ENV_PATH),
+            "writable": True,
+        }
+
+    def _config_get(self) -> None:
+        self._json(self._config_payload())
+
+    def _config_post(self, body: dict) -> None:
+        updates: dict[str, str] = {}
+        base = str(body.get("base_url") or "").strip()
+        model = str(body.get("model") or "").strip()
+        if base:
+            if not (base.startswith("http://") or base.startswith("https://")):
+                self._fail("base_url 要以 http:// 或 https:// 开头")
+                return
+            updates["NOVEL_BASE_URL"] = base
+        if model:
+            if len(model) > 64:
+                self._fail("model 名太长（>64 字符）")
+                return
+            updates["NOVEL_MODEL"] = model
+        if not updates:
+            self._fail("没有要改的项（base_url / model）")
+            return
+        backup = _write_env(updates)
+        # 写文件不够：from_env() 读的是 os.environ，得同步
+        for k, v in updates.items():
+            os.environ[k] = v
+        payload = self._config_payload()
+        payload["backup"] = backup.name if backup else None
+        self._json(payload)
 
     def log_message(self, fmt: str, *args) -> None:
         # 默认会把每个请求打成一长串，这里压掉；真出错在 except 里 print

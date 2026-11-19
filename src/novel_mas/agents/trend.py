@@ -136,7 +136,7 @@ class WorldTrend(BaseAgent):
                 raise RuntimeError("从 prompt 生成曲线要模型：先给 WorldTrend(llm=...)")
             points = self._curve_from_prompt(prompt)
 
-        warnings = self.validate_curve(points)
+        problems = self.find_slope_problems(points)
 
         conn = db.connect("trend.db")
         try:
@@ -152,7 +152,7 @@ class WorldTrend(BaseAgent):
         finally:
             conn.close()
 
-        return {"curve": points, "warnings": warnings}
+        return {"curve": points, "warnings": problems}
 
     def _curve_from_prompt(self, prompt: str, chapters: int = 20) -> list[CurvePoint]:
         """让模型把一段人话排成逐章目标分。
@@ -190,26 +190,48 @@ class WorldTrend(BaseAgent):
         return out
 
     @staticmethod
-    def validate_curve(
+    def find_slope_problems(
         points: list[CurvePoint], max_slope: int = MAX_SLOPE_DEFAULT
-    ) -> list[str]:
-        """纯逻辑：检查曲线有没有断崖。已真实现，可直接测。
+    ) -> list[dict]:
+        """纯逻辑：找出曲线的断崖与越界，返回结构化结果（给页面画图用）。
 
         一章从 90 掉到 15 不叫转折，叫失忆。
         """
-        warnings: list[str] = []
+        problems: list[dict] = []
         ordered = sorted(points, key=lambda p: p.chapter)
         for prev, cur in zip(ordered, ordered[1:]):
             delta = abs(cur.target - prev.target)
             if delta > max_slope:
-                warnings.append(
-                    f"第 {prev.chapter}→{cur.chapter} 章单章落差 {delta}，"
-                    f"超过上限 {max_slope}，建议拆成两章"
+                problems.append(
+                    {
+                        "kind": "slope",
+                        "chapter": cur.chapter,
+                        "prev_chapter": prev.chapter,
+                        "delta": delta,
+                        "message": (
+                            f"第 {prev.chapter}→{cur.chapter} 章单章落差 {delta}，"
+                            f"超过上限 {max_slope}，建议拆成两章"
+                        ),
+                    }
                 )
         for p in ordered:
             if not 0 <= p.target <= 100:
-                warnings.append(f"第 {p.chapter} 章目标分 {p.target} 越界（0–100）")
-        return warnings
+                problems.append(
+                    {
+                        "kind": "range",
+                        "chapter": p.chapter,
+                        "delta": None,
+                        "message": f"第 {p.chapter} 章目标分 {p.target} 越界（0–100）",
+                    }
+                )
+        return problems
+
+    @staticmethod
+    def validate_curve(
+        points: list[CurvePoint], max_slope: int = MAX_SLOPE_DEFAULT
+    ) -> list[str]:
+        """旧口径：只给人类读的警告句子。结构化版本见 find_slope_problems。"""
+        return [w["message"] for w in WorldTrend.find_slope_problems(points, max_slope)]
 
     # ---------- 工具 3：剧情走向打分 ----------
 

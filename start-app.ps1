@@ -1,4 +1,7 @@
-﻿# novel-mas 桌面启动器（关窗口 = 服务跟着退）
+﻿# ⚠ 本文件必须存成 UTF-8 with BOM。powershell.exe 5.1 会按 GBK 读无 BOM 的文件，
+#   中文注释里的引号会被吃掉，脚本直接语法错、双击没反应（2026-11-19 踩过）。
+#
+# novel-mas 桌面启动器（关窗口 = 服务跟着退）
 #
 # 关键点：
 #   1. 浏览器用**独立 profile**（--user-data-dir）开。
@@ -63,6 +66,17 @@ if (Test-Up) {
 # 独立 profile：开一个跟主浏览器无关的实例，关窗口就是真退
 New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
 
+# 这个 profile 下还活着的浏览器进程。用来判断"窗口到底关没关"——
+# 不能只看 Start-Process 给的句柄：Edge 遇到同 profile 的旧实例会直接复用，
+# 新句柄一秒就退出，脚本会误以为窗口关了、把服务杀掉（2026-11-19 踩过）。
+function Get-ProfileProcs {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -match '^(msedge|chrome)\.exe$' -and
+            $_.CommandLine -and $_.CommandLine -like "*$profileDir*"
+        }
+}
+
 $edge   = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
 $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 
@@ -76,19 +90,21 @@ if (-not $browserExe) {
     exit 0
 }
 
+$before = @(Get-ProfileProcs).Count
 $browser = Start-Process -FilePath $browserExe `
     -ArgumentList "--app=$url", "--user-data-dir=$profileDir", '--window-size=1320,900' `
     -PassThru
 
-Log "开了窗口，browser pid=$($browser.Id)"
+Log "开了窗口，browser pid=$($browser.Id)（开窗前该 profile 已有进程 $before 个）"
 
-# 等浏览器退出。关窗口 -> 进程结束 -> 这里返回
-try {
-    Wait-Process -Id $browser.Id -ErrorAction Stop
-    Log '窗口关了'
-} catch {
-    Log "等待出错（可能进程已经没了）：$($_.Exception.Message)"
+# 窗口关掉 = 这个 profile 下的浏览器进程清空
+$closed = $false
+$deadline = (Get-Date).AddHours(8)
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 2
+    if (@(Get-ProfileProcs).Count -eq 0) { $closed = $true; break }
 }
+if ($closed) { Log '窗口关了' } else { Log '等满 8 小时没等到窗口关闭，按关处理' }
 
 # 收尾：只杀自己起的服务，不动别人起的
 if ($server) {

@@ -325,6 +325,30 @@ def _book_ops() -> None:
 
 check("书能列出来、改名、删除（删除先备份）", _book_ops)
 
+print("=== 9. .env 生成/更新（不备份）===")
+
+
+def _env_render() -> None:
+    from novel_mas import web
+
+    # 新建：有头注释，键齐
+    text = web.render_env([], {"DEEPSEEK_API_KEY": "sk-test", "NOVEL_MODEL": "m"}, "# 头")
+    assert text.startswith("# 头"), text
+    assert "DEEPSEEK_API_KEY=sk-test" in text, text
+    body = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert len(body) == 2, text
+
+    # 更新：同名替换、不认识的键保留、缺的补在末尾
+    existing = ["# 注释", "OPENAI_API_KEY=old", "NOVEL_MODEL=old", "MY_PROXY=http://x"]
+    text = web.render_env(existing, {"NOVEL_MODEL": "new", "NOVEL_BASE_URL": "u"}, "")
+    assert "OPENAI_API_KEY=old" in text, text
+    assert "MY_PROXY=http://x" in text, text
+    assert "NOVEL_MODEL=new" in text and "NOVEL_MODEL=old" not in text, text
+    assert text.rstrip().endswith("NOVEL_BASE_URL=u"), text
+
+
+check("生成 .env：带头注释、保留未知键、同名覆盖", _env_render)
+
 print()
 print(f"通过 {passed} 项，失败 {len(failed)} 项")
 if failed:

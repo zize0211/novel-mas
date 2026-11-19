@@ -31,18 +31,35 @@ PORT_SCAN = 10          # 8787 被占就往后找 10 个，别直接起不来
 _REPO = Path(__file__).resolve().parents[2]
 
 
-def _env_path() -> Path:
-    """配置放哪：仓库根（开发）→ 用户目录（安装版）。
+def _can_write(dir_path: Path) -> bool:
+    try:
+        dir_path.mkdir(parents=True, exist_ok=True)
+        probe = dir_path / ".write-probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
-    装到 Program Files 时程序目录只读，.env 必须落到 %APPDATA%。
+
+def _env_path() -> Path:
+    """配置放哪：仓库根（开发）→ 用户目录（安装版）→ 哪个能写用哪个。
+
+    以前的兜底是「都没有就回仓库根」，装到 Program Files 时会 500
+    （程序目录只读）。现在先探一下能不能写，写不了就落 %APPDATA%。
     """
+    override = os.environ.get("NOVEL_ENV_FILE")
+    if override:
+        return Path(override)
     in_repo = _REPO / ".env"
+    user = Path(os.environ.get("APPDATA") or Path.home()) / "novel-mas" / ".env"
     if in_repo.exists():
         return in_repo
-    user = Path(os.environ.get("APPDATA") or Path.home()) / "novel-mas" / ".env"
     if user.exists():
         return user
-    return in_repo          # 都没有：还用仓库根，第一次保存时创建
+    if _can_write(_REPO):
+        return in_repo
+    return user
 
 
 ENV_PATH = _env_path()
@@ -91,19 +108,19 @@ def _read_env() -> dict[str, str]:
     return out
 
 
-def _write_env(updates: dict[str, str]) -> Path | None:
-    """把改动写回 .env，写前备份。返回备份路径（原来没有 .env 时为 None）。"""
-    backup: Path | None = None
-    lines: list[str] = []
-    if ENV_PATH.exists():
-        backup = ENV_PATH.with_name(f".env.bak-{datetime.now():%Y%m%d-%H%M%S}")
-        backup.write_bytes(ENV_PATH.read_bytes())
-        lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
+def render_env(existing: list[str], updates: dict[str, str], header: str) -> str:
+    """把「现有行 + 要改的键」渲染成 .env 全文（纯函数，方便测）。
+
+    规则：
+    - 同名的键就地替换
+    - **不认识的键原样保留**（用户自己加的，比如代理地址）
+    - 缺的键补在末尾
+    """
     seen: set[str] = set()
     out: list[str] = []
-    for line in lines:
+    for line in existing:
         key = line.split("=", 1)[0].strip()
-        if "=" in line and key in updates:
+        if "=" in line and not line.strip().startswith("#") and key in updates:
             out.append(f"{key}={updates[key]}")
             seen.add(key)
         else:
@@ -111,8 +128,31 @@ def _write_env(updates: dict[str, str]) -> Path | None:
     for k, v in updates.items():
         if k not in seen:
             out.append(f"{k}={v}")
-    ENV_PATH.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
-    return backup
+    text = "\n".join(out).strip("\n")
+    if header:
+        text = f"{header}\n{text}" if text else header
+    return text + "\n"
+
+
+def _write_env(updates: dict[str, str]) -> tuple[Path, bool]:
+    """把配置写进 .env。返回（路径, 是否新建）。
+
+    **不备份**（2026-11-19 改）：以前每次保存都复制一份 .env.bak，
+    每份都带明文 key —— 点十次就十把 key 躺在目录里。
+    """
+    created = not ENV_PATH.exists()
+    existing: list[str] = []
+    if not created:
+        existing = ENV_PATH.read_text(encoding="utf-8").splitlines()
+    header = (
+        f"# 由 GUI 生成于 {datetime.now():%Y-%m-%d %H:%M}；手改会被覆盖，"
+        "key 只在这个文件里，别提交到 git。"
+        if created
+        else ""
+    )
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ENV_PATH.write_text(render_env(existing, updates, header), encoding="utf-8")
+    return ENV_PATH, created
 
 
 PAGE = r"""<!DOCTYPE html>
@@ -290,6 +330,8 @@ PAGE = r"""<!DOCTYPE html>
         <input id="cfgBase" placeholder="https://api.deepseek.com/v1">
         <label>model</label>
         <input id="cfgModel" placeholder="deepseek-chat">
+        <label>api_key（留空 = 不动现有的）</label>
+        <input id="cfgKey" type="password" placeholder="sk-..." autocomplete="off">
         <div class="row" style="margin-top:10px">
           <button onclick="saveConfig()">保存</button>
           <button class="ghost" onclick="loadConfig()">重读</button>
@@ -468,12 +510,18 @@ function toggleConfig(force) {
 async function saveConfig() {
   const btn = event.currentTarget;
   busy(btn, true, '保存中…');
+  const typedKey = val('cfgKey');
   try {
-    const r = await post('/api/config', {base_url: val('cfgBase'), model: val('cfgModel')});
-    toast(r.backup ? '已保存，旧配置备份为 ' + r.backup : '已保存');
+    const r = await post('/api/config', {
+      base_url: val('cfgBase'),
+      model: val('cfgModel'),
+      api_key: typedKey,
+    });
+    if (typedKey) $('cfgKey').value = '';   // 别在输入框里留着明文
+    toast(r.message || '已保存', 7000);
     loadConfig();
   } catch (e) {
-    toast('失败：' + e.message, 5000);
+    toast('失败：' + e.message, 7000);
   } finally {
     busy(btn, false);
   }
@@ -1175,6 +1223,7 @@ class Handler(BaseHTTPRequestHandler):
         updates: dict[str, str] = {}
         base = str(body.get("base_url") or "").strip()
         model = str(body.get("model") or "").strip()
+        api_key = str(body.get("api_key") or "").strip()
         if base:
             if not (base.startswith("http://") or base.startswith("https://")):
                 self._fail("base_url 要以 http:// 或 https:// 开头")
@@ -1185,15 +1234,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._fail("model 名太长（>64 字符）")
                 return
             updates["NOVEL_MODEL"] = model
+        if api_key:
+            if not 8 <= len(api_key) <= 200:
+                self._fail("key 看着不对（长度应在 8–200 之间）")
+                return
+            # 沿用文件里已有的键名，别凭空多出一行同义键
+            env_file = _read_env()
+            key_name = (
+                "OPENAI_API_KEY"
+                if "OPENAI_API_KEY" in env_file and "DEEPSEEK_API_KEY" not in env_file
+                else "DEEPSEEK_API_KEY"
+            )
+            updates[key_name] = api_key
         if not updates:
-            self._fail("没有要改的项（base_url / model）")
+            self._fail("没有要改的项（base_url / model / api_key）")
             return
-        backup = _write_env(updates)
+        path, created = _write_env(updates)
         # 写文件不够：from_env() 读的是 os.environ，得同步
         for k, v in updates.items():
             os.environ[k] = v
         payload = self._config_payload()
-        payload["backup"] = backup.name if backup else None
+        payload.pop("writable", None)
+        payload["created"] = created
+        payload["message"] = ("生成了新的 .env：" if created else "更新了 .env：") + str(path)
         self._json(payload)
 
     def log_message(self, fmt: str, *args) -> None:

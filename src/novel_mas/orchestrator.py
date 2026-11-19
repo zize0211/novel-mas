@@ -195,7 +195,7 @@ class Orchestrator:
         curve = reg.call("writer", "get_curve", book_id=book, chapter=chapter)
 
         # 3. 取人物快照
-        chars = reg.call("writer", "get_characters", book_id=book)
+        chars = reg.call("writer", "get_characters", book_id=book, chapter=chapter)
 
         # 4. 取世界观 + 硬约束 + 前情
         wv = reg.call("writer", "get_worldview", book_id=book)
@@ -466,6 +466,21 @@ class Orchestrator:
                     chapter=chapter,
                 ),
             )
+
+            # 章落盘了，人物状态才推进一章 —— 被拦下的稿不算发生过。
+            # 状态由人物判官看完正文后给出（state_update）；没给就不推进，不替它编。
+            for rv in char_reviews:
+                st = str(rv.get("state_update") or "").strip()
+                if not st:
+                    continue
+                reg.call(
+                    "character",
+                    "advance_state",
+                    book_id=book,
+                    name=rv["name"],
+                    chapter=chapter,
+                    state=st,
+                )
 
         return WriteResult(
             chapter=chapter,

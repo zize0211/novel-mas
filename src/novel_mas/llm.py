@@ -122,6 +122,7 @@ class FakeProvider:
                     "others": {"score": 60, "reason": "[假模型]"},
                     "reader": {"score": 60, "reason": "[假模型]"},
                     "violations": [],
+                    "state": "[假模型] 本章末状态占位",
                     "constraints": [],
                     "ending_type": "happy",
                     "target_score": 60,

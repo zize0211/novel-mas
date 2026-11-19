@@ -86,6 +86,18 @@ CREATE TABLE IF NOT EXISTS characters (
   UNIQUE(book_id, name)
 );
 
+-- 每个人「到第几章是什么状态」。characters 只留最新一版，
+-- 写手按「本章」取它之前最近的一条 —— 不然每章看到的都是「初登场」。
+CREATE TABLE IF NOT EXISTS character_states (
+  id         INTEGER PRIMARY KEY,
+  book_id    TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  chapter    INTEGER NOT NULL,
+  state      TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(book_id, name, chapter)
+);
+
 CREATE TABLE IF NOT EXISTS relationships (
   id         INTEGER PRIMARY KEY,
   book_id    TEXT NOT NULL,

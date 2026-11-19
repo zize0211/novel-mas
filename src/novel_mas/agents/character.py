@@ -169,7 +169,8 @@ class CharacterControl(BaseAgent):
             '{"self": {"score": 0 到 100, "reason": "一句话"}, '
             '"others": {"score": 0 到 100, "reason": "一句话"}, '
             '"reader": {"score": 0 到 100, "reason": "一句话"}, '
-            '"violations": ["不符合人设的具体点，要引用人设原文里的说法"]}',
+            '"violations": ["不符合人设的具体点，要引用人设原文里的说法"], '
+            '"state": "这一段结束后，这个人处在什么状态（一句话，写变化：伤/在哪/心境）"}',
             system="你只输出 JSON，不聊天。三个视角分开评，不要互相带偏。",
         )
         data = parse_json_block(raw)
@@ -215,7 +216,48 @@ class CharacterControl(BaseAgent):
                 )
             ),
             "chapter": chapter,
+            # 下一章要用的状态。模型没给就留空，编排层不会拿空串去推进。
+            "state_update": str(data.get("state") or "").strip(),
         }
+
+    def advance_state(
+        self, book_id: str, name: str, chapter: int, state: str
+    ) -> dict:
+        """记下「这个人到第 chapter 章末是什么状态」。
+
+        两个地方一起写：
+        - character_states：逐章历史，写手按章取它之前最近的一条
+        - characters：同步成最新，老读法（直接读 state）不会坏
+
+        只写自己的库（char.db），符合「三个裁判各管各库」。
+        """
+        text = (state or "").strip()
+        if not text:
+            raise ValueError("state 不能空：没发生什么就别推进，别拿空串糊过去")
+        ch = int(chapter)
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO character_states(book_id, name, chapter, state, created_at)"
+                " VALUES(?,?,?,?,?)"
+                " ON CONFLICT(book_id, name, chapter) DO UPDATE SET state = excluded.state",
+                (
+                    book_id,
+                    name,
+                    ch,
+                    text,
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+            conn.execute(
+                "UPDATE characters SET state = ?, as_of_chapter = ?"
+                " WHERE book_id = ? AND name = ?",
+                (text, ch, book_id, name),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "name": name, "chapter": ch, "state": text}
 
     def _critique(self, text: str) -> list[str]:
         """第一趟：只挑毛病，不评分。三个自问固定，缺一件不算挑完。"""
@@ -314,3 +356,4 @@ def bind(registry, llm=None, book_id: str = "demo") -> None:
     registry.register("random_character", agent.random_character)
     registry.register("import_character", agent.import_character)
     registry.register("score_in_character", agent.score_in_character)
+    registry.register("advance_state", agent.advance_state)

@@ -69,7 +69,7 @@ check("白名单无遗漏", lambda: (_ for _ in ()).throw(AssertionError(reg.che
 
 def _counts() -> None:
     assert len(reg.names_for("world_will")) == 6
-    assert len(reg.names_for("character")) == 3
+    assert len(reg.names_for("character")) == 4
     assert len(reg.names_for("trend")) == 3
     assert len(reg.names_for("writer")) == 5
     assert len(reg.names_for("acceptor")) == 2
@@ -160,6 +160,45 @@ def _major_needs_constraints() -> None:
 
 
 check("大事件必须带 constraints", _major_needs_constraints)
+
+print("=== 6. 人物状态按章推进 ===")
+
+
+def _state_by_chapter() -> None:
+    from novel_mas.agents.character import CharacterControl
+    from novel_mas.agents.writer import Writer
+
+    book = "selfcheck-state"
+    cc = CharacterControl(book_id=book)
+    cc.import_character(
+        book_id=book, name="阿甲", profile="守夜人，话少", importance="lead"
+    )
+    cc.advance_state(book_id=book, name="阿甲", chapter=1, state="雨里淋了一夜，病倒")
+    cc.advance_state(book_id=book, name="阿甲", chapter=3, state="病好，回钟楼守夜")
+
+    w = Writer()
+    by_ch = {
+        ch: {c.name: c for c in w.get_characters(book, chapter=ch)}["阿甲"]
+        for ch in (1, 2, 3)
+    }
+    assert by_ch[1].state == "雨里淋了一夜，病倒", by_ch[1]
+    assert by_ch[1].as_of_chapter == 1, by_ch[1]
+    # 第 2 章自己没有状态 —— 必须取第 1 章那条，绝不能偷看第 3 章
+    assert by_ch[2].state == "雨里淋了一夜，病倒", by_ch[2]
+    assert by_ch[2].as_of_chapter == 1, by_ch[2]
+    assert by_ch[3].as_of_chapter == 3, by_ch[3]
+
+    # selfcheck 不往库里留测试数据
+    conn = db.connect("char.db")
+    try:
+        conn.execute("DELETE FROM character_states WHERE book_id = ?", (book,))
+        conn.execute("DELETE FROM characters WHERE book_id = ?", (book,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+check("状态随章取，旧章不被未来覆盖", _state_by_chapter)
 
 print()
 print(f"通过 {passed} 项，失败 {len(failed)} 项")

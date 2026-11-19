@@ -22,11 +22,12 @@ ROLE_TOOLS: dict[str, set[str]] = {
         "manage_random",
         "inject_event",
     },
-    # 人物控制：3 个
+    # 人物控制：4 个
     "character": {
         "random_character",
         "import_character",
         "score_in_character",
+        "advance_state",
     },
     # 世界走向：3 个
     "trend": {

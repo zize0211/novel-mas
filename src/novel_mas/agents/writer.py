@@ -66,11 +66,16 @@ class Writer(BaseAgent):
     # ---------- 工具 3：人物信息获取 ----------
 
     def get_characters(
-        self, book_id: str, names: list[str] | None = None
+        self,
+        book_id: str,
+        names: list[str] | None = None,
+        chapter: int | None = None,
     ) -> list[CharacterSnapshot]:
         """拿人物档的只读快照。
 
-        必须带 as_of_chapter —— 否则会拿第 3 章的旧状态写第 12 章。
+        必须带 chapter —— 否则会拿第 3 章的旧状态写第 12 章。
+        传了 chapter，就从 character_states 里取「不超过本章的最近一条」；
+        没传或没有历史，退回 characters 行上的 state / as_of_chapter。
 
         关系表一起取：一条关系在库里只存一行 (a, b)，但两个人身上都得挂，
         所以下面按 a / b 各展开一次，再按人名归组。
@@ -97,6 +102,19 @@ class Writer(BaseAgent):
                 rel_params.extend(names)   # a 那边的问号
                 rel_params.extend(names)   # b 那边的问号，必须再来一遍
             rel_rows = conn.execute(rel_sql, rel_params).fetchall()
+
+            # 逐章状态：按章号倒序，每个名字只留第一条（= 不晚于本章的最近一条）
+            states: dict[str, dict] = {}
+            if chapter is not None:
+                for r in conn.execute(
+                    "SELECT name, chapter, state FROM character_states"
+                    " WHERE book_id = ? AND chapter <= ?"
+                    " ORDER BY chapter DESC",
+                    (book_id, int(chapter)),
+                ):
+                    states.setdefault(
+                        r["name"], {"chapter": r["chapter"], "state": r["state"]}
+                    )
         finally:
             conn.close()
 
@@ -108,13 +126,19 @@ class Writer(BaseAgent):
                     {"with": other, "kind": r["kind"], "intensity": r["intensity"]}
                 )
 
+        def _state_of(row) -> tuple[str | None, int | None]:
+            hit = states.get(row["name"])
+            if hit:
+                return hit["state"], hit["chapter"]
+            return row["state"], row["as_of_chapter"]
+
         return [
             CharacterSnapshot(
                 name=row["name"],
                 importance=row["importance"],
                 profile=row["profile"],
-                state=row["state"],
-                as_of_chapter=row["as_of_chapter"],
+                state=_state_of(row)[0],
+                as_of_chapter=_state_of(row)[1],
                 relationships=rel_map.get(row["name"], []),
             )
             for row in rows

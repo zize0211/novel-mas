@@ -453,35 +453,160 @@ async function createCurve(fromPoints) {
   }
 }
 
+// ---- Q3：曲线可以直接拖点 ----
+// 规矩（2026-11-19 主人定的）：
+//   · 一屏最多 20 个点；章数不到 20 就按实际章数显示，不硬凑
+//   · 「放大」= 一屏点更少、间距更大 → 这时才能按住点上下拖
+//   · 「缩小」= 一屏点更多（看得到更远），但点太密，禁止拖，免得拖错章
+const CURVE_W = 320, CURVE_H = 130, CURVE_PAD = 18, CURVE_MAX_SPAN = 20;
+let curveState = { pts: [], win: 0, span: 0, problems: [] };
+let curveDrag = null;
+
 function renderCurve(r) {
-  const pts = r.points || [];
+  curveState.pts = (r.points || [])
+    .map(p => ({ chapter: +p.chapter, target: +p.target, tolerance: +p.tolerance || 15 }))
+    .sort((a, b) => a.chapter - b.chapter);
+  curveState.span = Math.min(CURVE_MAX_SPAN, curveState.pts.length);
+  curveState.win = 0;
+  curveState.problems = r.warnings || r.problems || [];
+  drawCurve();
+}
+
+function curveSpanMax() {
+  return Math.max(1, Math.min(CURVE_MAX_SPAN, curveState.pts.length));
+}
+
+function curveCanDrag() {
+  return curveState.pts.length > 0 && curveState.span <= curveSpanMax();
+}
+
+function drawCurve() {
   const box = $('curveChart');
-  if (!pts.length) { box.innerHTML = '<span class="muted">没有点。</span>'; return; }
-  const W = 320, H = 130, PAD = 18;
-  const chs = pts.map(p => p.chapter);
-  const minC = Math.min(...chs), maxC = Math.max(...chs);
-  const x = c => PAD + (maxC === minC ? (W - PAD * 2) / 2 : (c - minC) / (maxC - minC) * (W - PAD * 2));
-  const y = t => H - PAD - Math.max(0, Math.min(100, t)) / 100 * (H - PAD * 2);
-  const line = pts.map(p => x(p.chapter).toFixed(1) + ',' + y(p.target).toFixed(1)).join(' ');
-  const warnCh = new Set((r.warnings || []).map(w => w.chapter));
-  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="150" role="img">';
+  const st = curveState, n = st.pts.length;
+  if (!n) { box.innerHTML = '<span class="muted">还没有曲线。</span>'; return; }
+  const span = Math.max(1, Math.min(st.span || curveSpanMax(), n));
+  st.span = span;
+  const win = Math.max(0, Math.min(st.win || 0, n - span));
+  st.win = win;
+  const vis = st.pts.slice(win, win + span);
+  const x = i => CURVE_PAD + (span === 1
+    ? (CURVE_W - CURVE_PAD * 2) / 2
+    : i / (span - 1) * (CURVE_W - CURVE_PAD * 2));
+  const y = t => CURVE_H - CURVE_PAD - Math.max(0, Math.min(100, t)) / 100 * (CURVE_H - CURVE_PAD * 2);
+  const warn = new Set(st.problems.map(p => p.chapter));
+  const drag = curveCanDrag();
+  let svg = '<svg id="curveSvg" viewBox="0 0 ' + CURVE_W + ' ' + CURVE_H
+    + '" width="100%" height="150" role="img" style="touch-action:none">';
   [0, 50, 100].forEach(v => {
-    svg += '<line x1="' + PAD + '" y1="' + y(v) + '" x2="' + (W - PAD) + '" y2="' + y(v)
-         + '" stroke="#888" stroke-opacity="0.25"' + (v === 50 ? ' stroke-dasharray="3 3"' : '') + '/>';
+    svg += '<line x1="' + CURVE_PAD + '" y1="' + y(v) + '" x2="' + (CURVE_W - CURVE_PAD)
+      + '" y2="' + y(v) + '" stroke="#888" stroke-opacity="0.25"'
+      + (v === 50 ? ' stroke-dasharray="3 3"' : '') + '/>';
   });
-  svg += '<polyline fill="none" stroke="#4a9e8f" stroke-width="2" points="' + line + '"/>';
-  for (const p of pts) {
-    svg += '<circle cx="' + x(p.chapter).toFixed(1) + '" cy="' + y(p.target).toFixed(1)
-         + '" r="2.6" fill="' + (warnCh.has(p.chapter) ? '#d9534f' : '#4a9e8f') + '"/>';
-  }
+  svg += '<polyline fill="none" stroke="#4a9e8f" stroke-width="2" points="'
+    + vis.map((p, i) => x(i).toFixed(1) + ',' + y(p.target).toFixed(1)).join(' ') + '"/>';
+  vis.forEach((p, i) => {
+    const cx = x(i).toFixed(1), cy = y(p.target).toFixed(1);
+    const color = warn.has(p.chapter) ? '#d9534f' : '#4a9e8f';
+    if (drag) {
+      // 透明的打圆当热区：r=2.6 的点手指按不住
+      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="9" fill="transparent"'
+        + ' style="cursor:ns-resize" data-dot="' + (win + i) + '"/>';
+    }
+    svg += '<circle cx="' + cx + '" cy="' + cy + '" r="2.6" fill="' + color + '" pointer-events="none"/>';
+  });
   svg += '</svg>';
+
   let html = svg;
-  if (r.warnings && r.warnings.length) {
-    html += '<ul class="ev">' + r.warnings.map(w => '<li>' + esc(w.message) + '</li>').join('') + '</ul>';
+  html += '<div class="muted" style="margin-top:4px">第 ' + vis[0].chapter + '–'
+    + vis[vis.length - 1].chapter + ' 章 · 一屏 ' + span + ' 点 · '
+    + (drag ? '按住点上下拖' : '点太密，缩小状态不能拖') + '</div>';
+  html += '<div class="row" style="margin-top:6px">'
+    + '<button class="ghost" onclick="curveZoom(1)">放大</button>'
+    + '<button class="ghost" onclick="curveZoom(-1)">缩小</button>'
+    + '<button class="ghost" onclick="curvePan(-1)">◀</button>'
+    + '<button class="ghost" onclick="curvePan(1)">▶</button>'
+    + '<button onclick="saveCurve(false)">保存曲线</button>'
+    + '</div>';
+  if (st.problems.length) {
+    html += '<ul class="ev">' + st.problems.map(p => '<li>' + esc(p.message) + '</li>').join('') + '</ul>'
+      + '<button class="ghost" onclick="saveCurve(true)">仍然保存</button>';
   } else {
     html += '<div class="muted">坡度检查：没有断崖。</div>';
   }
   box.innerHTML = html;
+  if (drag) {
+    box.querySelectorAll('circle[data-dot]').forEach(c =>
+      c.addEventListener('pointerdown', ev => curveDotDown(ev, +c.dataset.dot)));
+  }
+}
+
+function curveZoom(dir) {
+  // 放大 = 一屏点更少（能拖）；缩小 = 一屏点更多（看更远，不能拖）
+  const n = curveState.pts.length;
+  const step = Math.max(1, Math.round(curveSpanMax() / 4));
+  if (dir > 0) curveState.span = Math.max(1, curveState.span - step);
+  else curveState.span = Math.min(n, curveState.span + step);
+  drawCurve();
+}
+
+function curvePan(dir) {
+  const n = curveState.pts.length;
+  curveState.win = Math.max(0, Math.min(curveState.win + dir * curveState.span,
+                                        Math.max(0, n - curveState.span)));
+  drawCurve();
+}
+
+function curveDotDown(ev, idx) {
+  ev.preventDefault();
+  curveDrag = idx;
+  document.addEventListener('pointermove', curveDotMove);
+  document.addEventListener('pointerup', curveDotUp);
+}
+
+function curveDotMove(ev) {
+  if (curveDrag === null) return;
+  const svg = $('curveSvg');
+  if (!svg) return;
+  const box = svg.getBoundingClientRect();
+  const ratio = box.height ? (ev.clientY - box.top) / box.height : 0;
+  const inSvg = ratio * CURVE_H;                     // 换回 viewBox 坐标
+  const plot = CURVE_H - CURVE_PAD * 2;
+  const t = Math.max(0, Math.min(100,
+    Math.round((CURVE_H - CURVE_PAD - inSvg) / plot * 100)));
+  if (curveState.pts[curveDrag].target !== t) {
+    curveState.pts[curveDrag].target = t;
+    curveState.problems = [];                        // 值变了，旧警告就过期了
+    drawCurve();
+  }
+}
+
+function curveDotUp() {
+  curveDrag = null;
+  document.removeEventListener('pointermove', curveDotMove);
+  document.removeEventListener('pointerup', curveDotUp);
+}
+
+async function saveCurve(force) {
+  const btn = event.currentTarget;
+  busy(btn, true, '保存中…');
+  try {
+    const r = await post('/api/curve/adjust', {
+      points: curveState.pts.map(p => ({ chapter: p.chapter, target: p.target, tolerance: p.tolerance })),
+      force: !!force,
+    });
+    if (r.saved) {
+      renderCurve({ points: r.points, warnings: r.problems });   // 用服务端的副本对齐
+      toast(r.message || '已保存', 4000);
+    } else {
+      curveState.problems = r.problems || [];
+      drawCurve();
+      toast(r.message || '有坡度问题，没保存', 5000);
+    }
+  } catch (e) {
+    toast('失败：' + e.message, 6000);
+  } finally {
+    busy(btn, false);
+  }
 }
 
 async function loadConfig() {
@@ -924,6 +1049,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._character_remove(book, body)
             elif parsed.path == "/api/curve":
                 self._curve(book, body)
+            elif parsed.path == "/api/curve/adjust":
+                self._curve_adjust(book, body)
             elif parsed.path == "/api/write":
                 self._write(book, body)
             elif parsed.path == "/api/config":
@@ -1099,6 +1226,67 @@ class Handler(BaseHTTPRequestHandler):
                 ],
                 "warnings": result["warnings"],
                 "message": f"生成 {len(curve)} 个点",
+            }
+        )
+
+    def _curve_adjust(self, book: str, body: dict) -> None:
+        """Q3：把页面上拖出来的点写回曲线。
+
+        两段式，不是一步存：先跑坡度检查，有断崖就**不存**，把问题回给页面标红；
+        用户看过、确认「仍然保存」再带 force=true 放行。
+
+        为什么不直接存 + 给个警告就算：滑条的整个意义就是"手滑很容易"，
+        手一滑存进一个「第 3 章 90 → 第 4 章 10」，写手后面每章都会照着这个断崖写。
+        校验不是为了拦人，是为了让那一下手滑有台阶可停。
+        """
+        from .agents.trend import WorldTrend
+
+        raw = body.get("points") or []
+        force = bool(body.get("force"))
+        if not raw:
+            self._fail("没有点可存")
+            return
+        try:
+            pts = [
+                CurvePoint(
+                    chapter=int(p["chapter"]),
+                    target=int(p["target"]),
+                    tolerance=int(p.get("tolerance", 15)),
+                )
+                for p in raw
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            self._fail(f"点的格式不对：{exc}")
+            return
+        if len({p.chapter for p in pts}) != len(pts):
+            self._fail("同一章出现了两次")
+            return
+
+        problems = WorldTrend.find_slope_problems(pts)
+        if problems and not force:
+            self._json(
+                {
+                    "ok": True,
+                    "saved": False,
+                    "problems": problems,
+                    "message": f"{len(problems)} 处问题，没保存（确认要存就点「仍然保存」）",
+                }
+            )
+            return
+
+        result = _make_orc(book, False).registry.call(
+            "trend", "set_curve", book_id=book, points=pts
+        )
+        self._json(
+            {
+                "ok": True,
+                "saved": True,
+                "points": [
+                    {"chapter": p.chapter, "target": p.target, "tolerance": p.tolerance}
+                    for p in result["curve"]
+                ],
+                "problems": result["warnings"],
+                "message": f"存好了 {len(result['curve'])} 个点",
             }
         )
 

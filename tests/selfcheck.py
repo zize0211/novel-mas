@@ -403,6 +403,31 @@ def _author_mode() -> None:
 
 check("写手旋钮：只影响写正文、出块还原、不带动判官", _author_mode)
 
+print("=== 11. 曲线坡度守卫（Q3 保存前的闸）===")
+
+
+def _curve_guard() -> None:
+    from novel_mas.agents.trend import WorldTrend
+    from novel_mas.types import CurvePoint
+
+    ok = [CurvePoint(chapter=i, target=t) for i, t in ((1, 50), (2, 55), (3, 60))]
+    assert WorldTrend.find_slope_problems(ok) == [], WorldTrend.find_slope_problems(ok)
+
+    cliff = [CurvePoint(chapter=3, target=90), CurvePoint(chapter=4, target=10)]
+    probs = WorldTrend.find_slope_problems(cliff)
+    assert len(probs) == 1, probs
+    assert probs[0]["kind"] == "slope" and probs[0]["chapter"] == 4, probs[0]
+    assert "落差 80" in probs[0]["message"], probs[0]["message"]
+
+    out = [CurvePoint(chapter=1, target=120)]
+    assert any(p["kind"] == "range" for p in WorldTrend.find_slope_problems(out))
+
+    # 「一屏最多 20 点、缩小时不能拖」是前端 JS 的规矩，Python 这边测不了，
+    # 由 HTTP 实测覆盖（见 docs/待解决问题.md Q3 的验证记录）。
+
+
+check("曲线坡度：合法不报、断崖报得准、越界报 range", _curve_guard)
+
 print()
 print(f"通过 {passed} 项，失败 {len(failed)} 项")
 if failed:

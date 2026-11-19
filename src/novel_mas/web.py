@@ -970,15 +970,32 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
+def _port_taken(port: int) -> bool:
+    """端口上有没有人在听。
+
+    为什么不用「bind 失败」来判断：Windows 下 http.server 默认开
+    SO_REUSEADDR，两个进程可以同时绑同一个端口 —— bind 会成功，
+    请求是谁接到只看运气。所以得主动连一下。（2026-11-19 踩过）
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        return s.connect_ex((HOST, port)) == 0
+
+
 def main() -> None:
     db.migrate()
     srv = None
     port = PORT
     for port in range(PORT, PORT + PORT_SCAN):
+        if _port_taken(port):
+            continue
         try:
             srv = ThreadingHTTPServer((HOST, port), Handler)
             break
         except OSError:
+            srv = None
             continue
     if srv is None:
         raise SystemExit(

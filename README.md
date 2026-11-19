@@ -313,6 +313,7 @@ print(r.brief())
 | `schemas/all.sql` | 三个库的建表 SQL |
 | `docs/architecture.md` | 设计取舍与已知问题 |
 | `docs/踩坑记录.md` | 联调与自检时踩的坑：现象、判据、根因、修法 |
+| `docs/待解决问题.md` | 实测提出的问题：现状、候选方案、成本/难度、待填解决方案 |
 | `tests/selfcheck.py` | 零依赖自检（CI 使用） |
 | `tests/audit_chapter.py` | 单章审计：过闸与三裁判打分 |
 | `tests/sas_baseline.py` | SAS 对照组 |

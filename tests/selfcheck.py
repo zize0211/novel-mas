@@ -69,7 +69,7 @@ check("白名单无遗漏", lambda: (_ for _ in ()).throw(AssertionError(reg.che
 
 def _counts() -> None:
     assert len(reg.names_for("world_will")) == 6
-    assert len(reg.names_for("character")) == 4
+    assert len(reg.names_for("character")) == 5
     assert len(reg.names_for("trend")) == 3
     assert len(reg.names_for("writer")) == 5
     assert len(reg.names_for("acceptor")) == 2
@@ -187,6 +187,24 @@ def _state_by_chapter() -> None:
     assert by_ch[2].state == "雨里淋了一夜，病倒", by_ch[2]
     assert by_ch[2].as_of_chapter == 1, by_ch[2]
     assert by_ch[3].as_of_chapter == 3, by_ch[3]
+
+    # 同名重导 = 改档，不是报错：档案更新，进度不丢
+    cc.advance_state(book_id=book, name="阿甲", chapter=5, state="又守了四夜")
+    cc.import_character(
+        book_id=book, name="阿甲", profile="守夜人，话少，左手旧伤", importance="lead"
+    )
+    again = {c.name: c for c in w.get_characters(book, chapter=5)}["阿甲"]
+    assert again.profile == "守夜人，话少，左手旧伤", again
+    assert again.as_of_chapter == 5, again
+
+    # 删干净：档案、逐章状态一起走；删不存在的人要报错，不许静默成功
+    cc.remove_character(book_id=book, name="阿甲")
+    assert w.get_characters(book, chapter=5) == []
+    try:
+        cc.remove_character(book_id=book, name="阿甲")
+        raise AssertionError("删不存在的人物应当抛 LookupError")
+    except LookupError:
+        pass
 
     # selfcheck 不往库里留测试数据
     conn = db.connect("char.db")

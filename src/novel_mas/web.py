@@ -474,7 +474,10 @@ async function loadBook() {
     let html = '<b>世界观</b><br>' + (r.world.length
       ? r.world.map(w => esc(w.title + '：' + w.body)).join('<br>') : dash);
     html += '<div style="margin-top:8px"><b>人物</b><br>' + (r.characters.length
-      ? r.characters.map(c => esc(c.name + '（' + c.importance + '｜' + (c.state || '未记') + '）')
+      ? r.characters.map(c =>
+          esc(c.name + '（' + c.importance + '｜' + (c.state || '未记') + '）')
+          + ' <button class="ghost" style="padding:0 6px;font-size:11px"'
+          + ' data-name="' + esc(c.name) + '" onclick="removeCharacter(this.dataset.name)">删</button>'
           + (c.profile ? '<br><span class="muted">' + esc(c.profile) + '</span>' : '')).join('<br>')
       : dash) + '</div>';
     html += '<div style="margin-top:8px"><b>曲线</b><br>' + (r.curve.length
@@ -483,6 +486,17 @@ async function loadBook() {
     if (r.curve.length) renderCurve({points: r.curve, warnings: []});
   } catch (e) {
     box.innerHTML = '<span class="bad">' + esc(e.message) + '</span>';
+  }
+}
+
+async function removeCharacter(name) {
+  if (!confirm('删掉「' + name + '」？档案和逐章状态都会删，撤不回来。')) return;
+  try {
+    const r = await post('/api/character_remove', {book_id: val('bookId') || 'demo', name: name});
+    toast(r.message || '删了', 5000);
+    loadBook();
+  } catch (e) {
+    toast('失败：' + e.message, 6000);
   }
 }
 
@@ -597,6 +611,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._worldview(book, body)
             elif parsed.path == "/api/character":
                 self._character(book, body)
+            elif parsed.path == "/api/character_remove":
+                self._character_remove(book, body)
             elif parsed.path == "/api/curve":
                 self._curve(book, body)
             elif parsed.path == "/api/write":
@@ -605,6 +621,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._config_post(body)
             else:
                 self._fail("没有这个路径", 404)
+        except (LookupError, ValueError) as exc:
+            # 用户能自己修的错（找不到 / 填错了）：400，说人话，别带类名前缀
+            self._fail(str(exc), 400)
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             self._fail(f"{type(exc).__name__}: {exc}", 500)
@@ -631,7 +650,29 @@ class Handler(BaseHTTPRequestHandler):
             "character", "import_character",
             book_id=book, name=name, profile=profile, importance=importance,
         )
-        self._json({"ok": True, "message": f"导入了 {snap.name}（{snap.importance}）"})
+        self._json(
+            {
+                "ok": True,
+                "message": f"导入了 {snap.name}（{snap.importance}）——同名会覆盖档案，状态的进度保留",
+            }
+        )
+
+    def _character_remove(self, book: str, body: dict) -> None:
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self._fail("要删谁？名字不能空")
+            return
+        reg = Orchestrator(book_id=book, llm=FakeProvider()).registry
+        r = reg.call("character", "remove_character", book_id=book, name=name)
+        self._json(
+            {
+                "ok": True,
+                "message": (
+                    f"删掉了 {r['name']}（连带 {r['states_removed']} 条状态、"
+                    f"{r['relationships_removed']} 条关系）"
+                ),
+            }
+        )
 
     def _curve(self, book: str, body: dict) -> None:
         raw_points = body.get("points")

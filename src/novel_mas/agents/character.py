@@ -105,6 +105,42 @@ class CharacterControl(BaseAgent):
             as_of_chapter=None,
         )
 
+    # ---------- 工具 5：删人物 ----------
+
+    def remove_character(self, book_id: str, name: str) -> dict:
+        """删掉一个人物：档案、逐章状态、关系里提到他的行。
+
+        删是真删（没有回收站），所以名字对不上就报错，不做「模糊匹配」——
+        一个字打错把别人删了，比报错难处理得多。
+        """
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("名字不能空")
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "DELETE FROM characters WHERE book_id = ? AND name = ?", (book_id, name)
+            )
+            if cur.rowcount == 0:
+                raise LookupError(f"{book_id} 里没有叫「{name}」的人物")
+            states = conn.execute(
+                "DELETE FROM character_states WHERE book_id = ? AND name = ?",
+                (book_id, name),
+            ).rowcount
+            rels = conn.execute(
+                "DELETE FROM relationships WHERE book_id = ? AND (a = ? OR b = ?)",
+                (book_id, name, name),
+            ).rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        return {
+            "ok": True,
+            "name": name,
+            "states_removed": states,
+            "relationships_removed": rels,
+        }
+
     # ---------- 工具 3：角色剧情打分 ----------
 
     # 三视角的权重。合起来才是「像不像他」。
@@ -294,7 +330,12 @@ class CharacterControl(BaseAgent):
             conn.execute(
                 "INSERT INTO characters"
                 "(book_id, name, importance, profile, state, as_of_chapter, created_at)"
-                " VALUES(?,?,?,?,?,?,?)",
+                " VALUES(?,?,?,?,?,?,?)"
+                # 同名重导 = 改档，不是报错。只改档案两列，
+                # state / as_of_chapter 留着 —— 改人设不该把人写到的进度抹掉。
+                " ON CONFLICT(book_id, name) DO UPDATE SET"
+                "   importance = excluded.importance,"
+                "   profile    = excluded.profile",
                 (
                     book_id,
                     name,
@@ -357,3 +398,4 @@ def bind(registry, llm=None, book_id: str = "demo") -> None:
     registry.register("import_character", agent.import_character)
     registry.register("score_in_character", agent.score_in_character)
     registry.register("advance_state", agent.advance_state)
+    registry.register("remove_character", agent.remove_character)

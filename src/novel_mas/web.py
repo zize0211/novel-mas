@@ -278,17 +278,24 @@ PAGE = r"""<!DOCTYPE html>
     </section>
 
     <section>
-      <h2>模型配置</h2>
-      <div id="cfg" class="muted">读着…</div>
-      <label style="margin-top:10px">base_url</label>
-      <input id="cfgBase" placeholder="https://api.deepseek.com/v1">
-      <label>model</label>
-      <input id="cfgModel" placeholder="deepseek-chat">
-      <div class="row" style="margin-top:10px">
-        <button onclick="saveConfig()">保存</button>
-        <button class="ghost" onclick="loadConfig()">重读</button>
+      <h2 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span>模型配置</span>
+        <span id="cfgSummary" class="muted" style="font-size:12px;font-weight:400">读着…</span>
+        <button class="ghost" id="cfgToggle" style="margin-left:auto;padding:2px 8px;font-size:12px"
+                onclick="toggleConfig()">展开</button>
+      </h2>
+      <div id="cfgBody" style="display:none">
+        <div id="cfg" class="muted"></div>
+        <label style="margin-top:10px">base_url</label>
+        <input id="cfgBase" placeholder="https://api.deepseek.com/v1">
+        <label>model</label>
+        <input id="cfgModel" placeholder="deepseek-chat">
+        <div class="row" style="margin-top:10px">
+          <button onclick="saveConfig()">保存</button>
+          <button class="ghost" onclick="loadConfig()">重读</button>
+        </div>
+        <div class="muted" style="margin-top:8px">key 只从 .env 读，页面不保存也不回显；改完写回 .env 并留一份备份。</div>
       </div>
-      <div class="muted" style="margin-top:8px">key 只从 .env 读，页面不保存也不回显；改完写回 .env 并留一份备份。</div>
     </section>
 
     <section>
@@ -432,15 +439,30 @@ function renderCurve(r) {
 
 async function loadConfig() {
   const box = $('cfg');
+  const sum = $('cfgSummary');
   try {
     const r = await get('/api/config');
     $('cfgBase').value = r.base_url;
     $('cfgModel').value = r.model;
+    // 收起时只看这一行：用的哪个模型、连的哪个端点、key 有没有
+    sum.innerHTML = '<b>' + esc(r.model) + '</b> @ ' + esc(r.base_url)
+      + (r.has_key ? ' · key ' + esc(r.key_tail) : ' · <b class="bad">key 没配</b>');
     box.innerHTML = '当前：<b>' + esc(r.model) + '</b> @ ' + esc(r.base_url)
-      + '<br>key：' + (r.has_key ? '已配置（' + esc(r.key_tail) + '）' : '<b class="bad">没有</b>');
+      + '<br>key：' + (r.has_key ? '已配置（' + esc(r.key_tail) + '）' : '<b class="bad">没有</b>')
+      + '<br>写回的文件：<code>' + esc(r.env_file) + '</code>';
+    // 没 key 就别让面板缩着——那是新用户第一件要干的事
+    if (!r.has_key) toggleConfig(true);
   } catch (e) {
+    sum.innerHTML = '<span class="bad">读不到配置</span>';
     box.innerHTML = '<span class="bad">读不到配置：' + esc(e.message) + '</span>';
   }
+}
+
+function toggleConfig(force) {
+  const body = $('cfgBody');
+  const open = (force === undefined) ? (body.style.display === 'none') : !!force;
+  body.style.display = open ? 'block' : 'none';
+  $('cfgToggle').textContent = open ? '收起' : '展开';
 }
 
 async function saveConfig() {

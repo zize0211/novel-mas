@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -283,14 +284,25 @@ class OpenAIProvider:
             method="POST",
         )
 
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")[:400]
-            raise RuntimeError(f"模型返回 HTTP {exc.code}：{body}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"连不上模型 {self.base_url}：{exc.reason}") from exc
+        # 瞬时网络抖动（笔记本休眠唤醒后 DNS 失效、Wi-Fi 刚切换）很常见，
+        # 重试一次基本就过 —— 别让一次 getaddrinfo 失败废掉整章。
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", "replace")[:400]
+                raise RuntimeError(f"模型返回 HTTP {exc.code}：{body}") from exc
+            except urllib.error.URLError as exc:
+                if attempt == 0:
+                    time.sleep(1.5)
+                    continue
+                reason = exc.reason
+                detail = str(reason)
+                if isinstance(reason, OSError) and "11001" in detail:
+                    detail += "（域名解析失败：多半是网络刚切换或刚休眠唤醒，等两秒再点一次）"
+                raise RuntimeError(f"连不上模型 {self.base_url}：{detail}") from exc
 
         usage = data.get("usage") or {}
         self._tokens += int(usage.get("total_tokens") or 0)

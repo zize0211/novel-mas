@@ -204,6 +204,27 @@ def parse_json_block(text: str) -> dict:
     return obj
 
 
+def _env_file_values(path: str | None = None) -> dict[str, str]:
+    """把 .env 读成 dict（不写进 os.environ）。仓库根的 .env 优先。"""
+    candidates = []
+    if path:
+        candidates.append(Path(path))
+    else:
+        candidates.append(Path(__file__).resolve().parents[2] / ".env")
+        candidates.append(Path(".env"))
+    for p in candidates:
+        if p.is_file():
+            out: dict[str, str] = {}
+            for raw in p.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                out[k.strip()] = v.strip().strip("'\"")
+            return out
+    return {}
+
+
 def _load_dotenv(path: str = ".env") -> None:
     """把 .env 读进 os.environ。没有这个文件就静默跳过。
 
@@ -246,21 +267,39 @@ class OpenAIProvider:
 
     @classmethod
     def from_env(cls) -> "OpenAIProvider":
-        """从环境变量建。key 不进代码、不进 git。"""
-        _load_dotenv()          # 先把 .env 捞进来，再读环境变量
-        key = (
-            os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("DEEPSEEK_API_KEY")
-            or ""
-        ).strip()
+        """建 provider。**.env 优先，环境变量兜底。**
+
+        为什么跟 12-factor 反着来：GUI 面板改的就是 .env，而进程环境里可能
+        挂着别处来的 OPENAI_API_KEY / DEEPSEEK_API_KEY（比如本机别的工具）。
+        那些 key 不属于这本书的配置，抢了先就是 401，而且用户改面板不生效。
+        """
+        file_env = _env_file_values()
+        _load_dotenv()          # 没有 .env 时，仍然能靠环境变量跑
+
+        def pick(*names: str, default: str = "") -> str:
+            # 先在所有候选名里找 .env，再在环境变量里找 —— 不能按名字逐个混着看，
+            # 否则 .env 里写的是 DEEPSEEK_API_KEY，而环境里恰好有 OPENAI_API_KEY，
+            # 就会先命中环境里那个无关的 key（踩过：401 invalid api key）。
+            for n in names:
+                v = file_env.get(n)
+                if v:
+                    return v.strip()
+            for n in names:
+                v = os.environ.get(n)
+                if v:
+                    return v.strip()
+            return default
+
+        key = pick("OPENAI_API_KEY", "DEEPSEEK_API_KEY")
         if not key:
             raise RuntimeError(
-                "没找到 API key：先设 OPENAI_API_KEY 或 DEEPSEEK_API_KEY"
+                "没找到 API key：在 .env 里写 OPENAI_API_KEY 或 DEEPSEEK_API_KEY，"
+                "或设同名环境变量"
             )
         return cls(
             api_key=key,
-            model=os.environ.get("NOVEL_MODEL", "deepseek-chat"),
-            base_url=os.environ.get("NOVEL_BASE_URL", "https://api.deepseek.com/v1"),
+            model=pick("NOVEL_MODEL", default="deepseek-chat"),
+            base_url=pick("NOVEL_BASE_URL", default="https://api.deepseek.com/v1"),
         )
 
     def complete(self, prompt: str, system: str = "") -> str:

@@ -45,6 +45,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# 篇幅软约束（2026-11-19 主人定：一章 2500–3000 字）。
+# 只进 prompt，不拦章、不触发重写 —— 模型对数字的服从度一般，
+# 先让它有个目标，实际字数照实报出来，超了自己看得见。
+WORDS_MIN = 2500
+WORDS_MAX = 3000
+
+
 @dataclass
 class WriteResult:
     chapter: int
@@ -55,6 +62,7 @@ class WriteResult:
     target: int
     deviation: int
     tokens: int
+    words: int = 0             # 正文字数（含标点，去掉空白后计数）
     evidence: list[str] = field(default_factory=list)
     out_path: str | None = None
     # token 按角色分账。只报一个总数，说不清钱花在哪 ——
@@ -66,6 +74,7 @@ class WriteResult:
             f"第 {self.chapter} 章 · 过闸 {self.verdict.upper()} / 走向 {self.trend_verdict}",
             f"  走向分 {self.score} / 目标 {self.target}（偏差 {self.deviation:+d}）",
             f"  用掉 token {self.tokens}",
+            f"  篇幅 {self.words} 字（目标 {WORDS_MIN}–{WORDS_MAX}）",
         ]
         # 分账只列真花了钱的（取数类工具不调模型，永远是 0，不占行）
         spent = [
@@ -223,6 +232,9 @@ class Orchestrator:
             f"【人物】\n{char_block}\n"
             f"【世界观】\n{world_block}\n"
             f"【硬约束】{constraints or '无'}\n"
+            f"【篇幅】正文 {WORDS_MIN}–{WORDS_MAX} 字（含标点），目标中段 2800 字左右。\n"
+            "  靠细节、动作、环境和心理把字数写够；不要用概括或重复注水，\n"
+            "  也不要写成提纲。这一条是软要求，写不到也别硬凑。\n"
             f"请写这一章的正文。"
         )
 
@@ -482,8 +494,12 @@ class Orchestrator:
                     state=st,
                 )
 
+        # 字数口径：去掉所有空白后的字符数（含标点）。中文按字算，不按 token 算。
+        words = len("".join(text.split()))
+
         return WriteResult(
             chapter=chapter,
+            words=words,
             text=text,
             verdict="violated" if blocked else "pass",
             trend_verdict=scored.verdict.value,

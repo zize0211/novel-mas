@@ -455,6 +455,7 @@ function renderResult(r) {
        + '<span>目标 <b>' + r.target + '</b></span>'
        + '<span>偏差 <b class="' + tcls + '">' + dv + '</b></span>'
        + '<span>token <b>' + r.tokens + '</b></span>'
+       + '<span>字数 <b>' + (r.words || 0) + '</b></span>'
        + '<span>落盘 <b>' + (r.out_path ? '是' : '没写（被拦）') + '</b></span>'
        + '</div>';
   if (r.evidence && r.evidence.length) {
@@ -724,6 +725,7 @@ class Handler(BaseHTTPRequestHandler):
             "target": r.target,
             "deviation": r.deviation,
             "tokens": r.tokens,
+            "words": r.words,
             "evidence": r.evidence,
             "out_path": r.out_path,
             "style": style,
@@ -734,21 +736,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def _config_payload(self) -> dict:
         env_file = _read_env()
+        # 跟 llm.from_env 一个口径：**.env 优先，环境变量兜底**。
+        # 反过来的话，面板显示的 key 跟真正在用的 key 可能不是同一个（踩过 401）。
         base_url = (
-            os.environ.get("NOVEL_BASE_URL")
-            or env_file.get("NOVEL_BASE_URL")
+            env_file.get("NOVEL_BASE_URL")
+            or os.environ.get("NOVEL_BASE_URL")
             or "https://api.deepseek.com/v1"
         )
         model = (
-            os.environ.get("NOVEL_MODEL")
-            or env_file.get("NOVEL_MODEL")
+            env_file.get("NOVEL_MODEL")
+            or os.environ.get("NOVEL_MODEL")
             or "deepseek-chat"
         )
         key = (
-            os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("DEEPSEEK_API_KEY")
-            or env_file.get("OPENAI_API_KEY")
+            env_file.get("OPENAI_API_KEY")
             or env_file.get("DEEPSEEK_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("DEEPSEEK_API_KEY")
             or ""
         ).strip()
         return {

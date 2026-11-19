@@ -1,6 +1,12 @@
 @echo off
 rem novel-mas desktop launcher - double click me
-rem All the real work is in start-app.ps1
+rem The real work is in start-app.ps1
 chcp 65001 >nul
-rem -WindowStyle Hidden：脚本要在后台等浏览器关掉，不弹黑框
-powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-app.ps1"
+
+rem Use `start` so this cmd window can exit immediately.
+rem If powershell runs in the foreground, cmd stays alive until the ps1
+rem finishes (and the ps1 waits until the app window is closed) - that is
+rem the black window you would otherwise see hanging around.
+rem -WindowStyle Hidden keeps the helper powershell itself invisible too.
+start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-app.ps1"
+exit

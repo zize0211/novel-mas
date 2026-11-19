@@ -700,6 +700,20 @@ class Handler(BaseHTTPRequestHandler):
         if not brief:
             self._fail("大纲不能空")
             return
+        # 没曲线就直接说人话。写手那边抛的是 LookupError（「第 1 章的曲线不存在」），
+        # 到页面上就成了一条看不懂的报错——新书第一次写章几乎必踩。
+        conn = db.connect("trend.db")
+        try:
+            has_curve = conn.execute(
+                "SELECT 1 FROM curve WHERE book_id = ? AND chapter = ?", (book, chapter)
+            ).fetchone()
+        finally:
+            conn.close()
+        if not has_curve:
+            self._fail(
+                f"这本书还没有第 {chapter} 章的曲线：先去 ③ 生成或手填，再写这一章", 400
+            )
+            return
         r = _make_orc(book, real, style).write_chapter(chapter, brief)
         self._json({
             "ok": True,

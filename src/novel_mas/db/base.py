@@ -7,12 +7,48 @@ trend.db  ── 世界走向独占（写手只读）
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parents[3] / "data"
-SCHEMA_FILE = Path(__file__).resolve().parents[3] / "schemas" / "all.sql"
+_REPO = Path(__file__).resolve().parents[3]
+
+
+def _data_dir() -> Path:
+    """数据放哪。三档，从「开发」到「装给别人用」。
+
+    1. `NOVEL_DATA_DIR` 环境变量（测试用，指定哪写哪）
+    2. 仓库里的 `data/`（开发时就在仓库里，方便看库）
+    3. `%APPDATA%\\novel-mas\\data`（打包 / 装到 Program Files 时仓库目录是只读的）
+
+    为什么不是只有一个：装到 Program Files 后程序目录不可写，
+    真把库写在程序旁边，用户第一次跑就会炸。
+    """
+    env = os.environ.get("NOVEL_DATA_DIR")
+    if env:
+        return Path(env)
+    repo_data = _REPO / "data"
+    if repo_data.is_dir():
+        return repo_data
+    base = Path(os.environ.get("APPDATA") or Path.home())
+    return base / "novel-mas" / "data"
+
+
+def _schema_file() -> Path:
+    """建表 SQL 在哪。打包后不在仓库里，得从解包目录取。"""
+    env = os.environ.get("NOVEL_SCHEMA_FILE")
+    if env:
+        return Path(env)
+    in_repo = _REPO / "schemas" / "all.sql"
+    if in_repo.is_file():
+        return in_repo
+    return Path(getattr(sys, "_MEIPASS", str(_REPO))) / "schemas" / "all.sql"
+
+
+DATA_DIR = _data_dir()
+SCHEMA_FILE = _schema_file()
 
 DB_NAMES = ("world.db", "char.db", "trend.db")
 

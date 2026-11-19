@@ -25,9 +25,27 @@ from .llm import FakeProvider, OpenAIProvider
 from .orchestrator import Orchestrator
 from .types import CurvePoint
 
-PORT = 8787
 HOST = "127.0.0.1"
-ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+PORT = int(os.environ.get("NOVEL_PORT") or 8787)
+PORT_SCAN = 10          # 8787 被占就往后找 10 个，别直接起不来
+_REPO = Path(__file__).resolve().parents[2]
+
+
+def _env_path() -> Path:
+    """配置放哪：仓库根（开发）→ 用户目录（安装版）。
+
+    装到 Program Files 时程序目录只读，.env 必须落到 %APPDATA%。
+    """
+    in_repo = _REPO / ".env"
+    if in_repo.exists():
+        return in_repo
+    user = Path(os.environ.get("APPDATA") or Path.home()) / "novel-mas" / ".env"
+    if user.exists():
+        return user
+    return in_repo          # 都没有：还用仓库根，第一次保存时创建
+
+
+ENV_PATH = _env_path()
 
 
 def _demo_curve(prompt: str, chapters: int = 20) -> list[CurvePoint]:
@@ -954,8 +972,28 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     db.migrate()
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"实验台起来了： http://{HOST}:{PORT}")
+    srv = None
+    port = PORT
+    for port in range(PORT, PORT + PORT_SCAN):
+        try:
+            srv = ThreadingHTTPServer((HOST, port), Handler)
+            break
+        except OSError:
+            continue
+    if srv is None:
+        raise SystemExit(
+            f"{PORT}–{PORT + PORT_SCAN - 1} 全被占了，起不来。"
+            "关掉占用的程序，或用 NOVEL_PORT 指定端口。"
+        )
+    if port != PORT:
+        print(f"注意：{PORT} 被占用，改用 {port}")
+    # 把实际端口写下来：启动器要按它开窗口，别硬编码 8787
+    try:
+        (db.DATA_DIR / "port.txt").write_text(str(port), encoding="utf-8")
+    except OSError:
+        pass
+    print(f"实验台起来了： http://{HOST}:{port}")
+    print(f"数据目录：{db.DATA_DIR}")
     print("Ctrl+C 停。")
     try:
         srv.serve_forever()

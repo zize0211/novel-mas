@@ -210,7 +210,11 @@ def _env_file_values(path: str | None = None) -> dict[str, str]:
     if path:
         candidates.append(Path(path))
     else:
+        # 开发时用仓库根的 .env；安装版（仓库目录只读）读用户目录那份
         candidates.append(Path(__file__).resolve().parents[2] / ".env")
+        candidates.append(
+            Path(os.environ.get("APPDATA") or Path.home()) / "novel-mas" / ".env"
+        )
         candidates.append(Path(".env"))
     for p in candidates:
         if p.is_file():

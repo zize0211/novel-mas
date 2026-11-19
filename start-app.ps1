@@ -12,7 +12,13 @@
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$url = 'http://127.0.0.1:8787'
+
+# 端口不写死：服务在 8787 被占时会自动往后找，并把实际端口写进 data\port.txt。
+# 启动器要跟着它，否则窗口会对着一个没人的端口报 Failed to fetch。
+$dataDir = if ($env:NOVEL_DATA_DIR) { $env:NOVEL_DATA_DIR } else { Join-Path $root 'data' }
+$portFile = Join-Path $dataDir 'port.txt'
+$port = 8787
+$url = "http://127.0.0.1:$port"
 $log = Join-Path $root 'app.log'
 $profileDir = Join-Path $root '.appdata\edge-profile'
 
@@ -21,9 +27,22 @@ function Log($msg) {
     Add-Content -Path $log -Value $line -Encoding UTF8
 }
 
+function Update-Port {
+    if (-not (Test-Path $portFile)) { return }
+    $saved = (Get-Content $portFile -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $saved) { return }
+    $saved = $saved.Trim()
+    if ($saved -match '^\d+$' -and [int]$saved -ne $port) {
+        $script:port = [int]$saved
+        $script:url = "http://127.0.0.1:$($script:port)"
+        Log "端口变成 $($script:port)（读自 port.txt）"
+    }
+}
+
 function Test-Up {
+    Update-Port
     try {
-        $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2
+        $r = Invoke-WebRequest -Uri $script:url -UseBasicParsing -TimeoutSec 2
         return ($r.StatusCode -eq 200)
     } catch {
         return $false
